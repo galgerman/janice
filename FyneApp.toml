@@ -10,12 +10,12 @@ Website = "https://github.com/ErikKalkoken/janice"
 [Release]
   BuildName = "janice"
   ContentRating = "oars-1.1"
-  Description = "<p>A desktop app for viewing large JSON files. Please see website for details.</p>"
+  Description = "<p>A desktop app for viewing large JSON and JSONL files. Please see website for details.</p>"
   License = "MIT"
   Screenshots = "https://cdn.imgpile.com/f/0IrYBjJ_xl.png"
 
 [LinuxAndBSD]
   GenericName = "JSON viewer"
   Categories = ["Utility"]
-  Comment = "A desktop app for viewing large JSON files"
-  Keywords = ["json", "viewer"]
+  Comment = "A desktop app for viewing large JSON and JSONL files"
+  Keywords = ["json", "jsonl", "viewer"]

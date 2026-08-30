@@ -31,6 +31,12 @@ func newJSONTree(u *UI) *jsonTree {
 	w.UpdateNode = func(uid widget.TreeNodeID, branch bool, co fyne.CanvasObject) {
 		node := u.document.Value(uid)
 		obj := co.(*treeNode)
+		key := node.Key
+		if u.document.IsJSONLines() && u.jsonLinesBar != nil {
+			if preview, ok := u.document.JSONLinesRowPreview(uid, u.jsonLinesBar.selectedPreviewKey()); ok {
+				key = fmt.Sprintf("%s — %s", key, preview)
+			}
+		}
 		var text string
 		switch v := node.Value; node.Type {
 		case jsondocument.Array:
@@ -65,7 +71,7 @@ func newJSONTree(u *UI) *jsonTree {
 		default:
 			text = fmt.Sprintf("%v", v)
 		}
-		obj.set(node.Key, text, type2importance[node.Type])
+		obj.set(key, text, type2importance[node.Type])
 	}
 	w.OnSelected = func(uid widget.TreeNodeID) {
 		u.selectElement(uid)

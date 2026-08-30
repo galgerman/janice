@@ -3,10 +3,12 @@ package jsondocument
 
 import (
 	"context"
+	stdjson "encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -103,6 +105,8 @@ type JSONDocument struct {
 
 	progressInfo  binding.Untyped
 	elementsCount int
+	isJSONLines   bool
+	previewKeys   []string
 
 	// ids are stored as int32 to save memory. The API converts them to and from UID strings.
 	ids     map[int32][]int32
@@ -147,12 +151,17 @@ func (j *JSONDocument) Value(uid widget.TreeNodeID) Node {
 // Closes the reader.
 func (j *JSONDocument) Load(ctx context.Context, reader fyne.URIReadCloser, progressInfo binding.Untyped) error {
 	j.progressInfo = progressInfo
-	data, err := j.load(ctx, reader)
+	isJSONLinesFile := strings.EqualFold(filepath.Ext(reader.URI().Path()), ".jsonl")
+	data, isJSONLines, err := j.loadWithFormat(ctx, reader)
 	if errors.Is(err, context.Canceled) {
 		err = ErrCallerCanceled
 	}
 	if err != nil {
 		return err
+	}
+	if isJSONLinesFile && !isJSONLines {
+		data = []any{data}
+		isJSONLines = true
 	}
 	select {
 	case <-ctx.Done():
@@ -180,6 +189,10 @@ func (j *JSONDocument) Load(ctx context.Context, reader fyne.URIReadCloser, prog
 	if err := j.render(ctx, data, int32(size)); err != nil {
 		return err
 	}
+	j.isJSONLines = isJSONLines
+	if isJSONLines {
+		j.previewKeys = collectPreviewKeys(data)
+	}
 	data = nil // GC can free this memory
 	slog.Info("Finished loading JSON document into tree", "size", j.n)
 	return nil
@@ -188,6 +201,86 @@ func (j *JSONDocument) Load(ctx context.Context, reader fyne.URIReadCloser, prog
 // Size returns the number of nodes.
 func (j *JSONDocument) Reset() {
 	j.initialize(0)
+	j.isJSONLines = false
+	j.previewKeys = nil
+}
+
+// IsJSONLines reports whether the document was loaded from a stream containing
+// multiple JSON values (JSON Lines).
+func (j *JSONDocument) IsJSONLines() bool {
+	return j.isJSONLines
+}
+
+// JSONLinesRowCount returns the number of top-level JSON Lines records.
+func (j *JSONDocument) JSONLinesRowCount() int {
+	if !j.isJSONLines {
+		return 0
+	}
+	return len(j.ids[0])
+}
+
+// JSONLinesPreviewKeys returns the scalar keys available on top-level JSON
+// Lines objects. The returned slice is safe for callers to modify.
+func (j *JSONDocument) JSONLinesPreviewKeys() []string {
+	return slices.Clone(j.previewKeys)
+}
+
+// JSONLinesRowUID returns the tree UID for a zero-based JSON Lines row.
+func (j *JSONDocument) JSONLinesRowUID(row int) (widget.TreeNodeID, bool) {
+	if !j.isJSONLines || row < 0 || row >= len(j.ids[0]) {
+		return "", false
+	}
+	return id2uid(j.ids[0][row]), true
+}
+
+// JSONLinesRowIndex returns the zero-based JSON Lines row containing uid.
+func (j *JSONDocument) JSONLinesRowIndex(uid widget.TreeNodeID) int {
+	if !j.isJSONLines || uid == "" {
+		return -1
+	}
+	id := uid2id(uid)
+	for j.parents[id] != 0 {
+		id = j.parents[id]
+		if id == rootNodeParentID {
+			return -1
+		}
+	}
+	return slices.Index(j.ids[0], id)
+}
+
+// JSONLinesRowPreview returns a formatted scalar value for key on the row
+// represented by uid.
+func (j *JSONDocument) JSONLinesRowPreview(uid widget.TreeNodeID, key string) (string, bool) {
+	if uid == "" || j.parents[uid2id(uid)] != 0 {
+		return "", false
+	}
+	row := j.JSONLinesRowIndex(uid)
+	if row < 0 || key == "" {
+		return "", false
+	}
+	rowID := j.ids[0][row]
+	if j.values[rowID].Type != Object {
+		return "", false
+	}
+	for _, childID := range j.ids[rowID] {
+		n := j.values[childID]
+		if n.Key != key {
+			continue
+		}
+		switch n.Type {
+		case String:
+			return n.Value.(string), true
+		case Number:
+			return strconv.FormatFloat(n.Value.(float64), 'f', -1, 64), true
+		case Boolean:
+			return strconv.FormatBool(n.Value.(bool)), true
+		case Null:
+			return "null", true
+		default:
+			return "", false
+		}
+	}
+	return "", false
 }
 
 // Parent returns the UID of the parent node.
@@ -239,17 +332,63 @@ func newReaderContext(ctx context.Context, r io.ReadCloser) io.ReadCloser {
 }
 
 func (j *JSONDocument) load(ctx context.Context, reader io.ReadCloser) (any, error) {
+	data, _, err := j.loadWithFormat(ctx, reader)
+	return data, err
+}
+
+func (j *JSONDocument) loadWithFormat(ctx context.Context, reader io.ReadCloser) (any, bool, error) {
 	defer reader.Close()
 	if err := j.setProgressInfo(ProgressInfo{CurrentStep: 1}); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	var data any
 	reader2 := newReaderContext(ctx, reader)
-	dec := json.NewDecoder(reader2)
+	dec := stdjson.NewDecoder(reader2)
 	if err := dec.Decode(&data); err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return data, nil
+	rows := []any{data}
+	for {
+		var row any
+		err := dec.Decode(&row)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, false, err
+		}
+		rows = append(rows, row)
+	}
+	if len(rows) == 1 {
+		return data, false, nil
+	}
+	return rows, true, nil
+}
+
+func collectPreviewKeys(data any) []string {
+	rows, ok := data.([]any)
+	if !ok {
+		return nil
+	}
+	keys := make(map[string]struct{})
+	for _, row := range rows {
+		object, ok := row.(map[string]any)
+		if !ok {
+			continue
+		}
+		for key, value := range object {
+			switch value.(type) {
+			case string, float64, bool, nil:
+				keys[key] = struct{}{}
+			}
+		}
+	}
+	result := make([]string, 0, len(keys))
+	for key := range keys {
+		result = append(result, key)
+	}
+	slices.Sort(result)
+	return result
 }
 
 // render is the main method for rendering the JSON data into a tree.

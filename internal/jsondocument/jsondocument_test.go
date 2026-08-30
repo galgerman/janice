@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"fyne.io/fyne/v2"
@@ -160,6 +161,68 @@ func TestJsonDocumentLoad(t *testing.T) {
 				assert.Equal(t, 3, p.TotalSteps)
 			}
 		}
+	})
+}
+
+func TestJSONLinesLoad(t *testing.T) {
+	t.Run("loads multiple JSON values as rows", func(t *testing.T) {
+		j := jsondocument.New()
+		data := "{\"id\":1,\"name\":\"Alpha\",\"nested\":{\"value\":true}}\n" +
+			"{\"id\":2,\"name\":\"Bravo\",\"active\":false}\n"
+		err := j.Load(context.Background(), jsondocument.MakeURIReadCloser(strings.NewReader(data), "test.jsonl"), binding.NewUntyped())
+		if !assert.NoError(t, err) {
+			return
+		}
+
+		assert.True(t, j.IsJSONLines())
+		assert.Equal(t, 2, j.JSONLinesRowCount())
+		assert.Equal(t, []string{"active", "id", "name"}, j.JSONLinesPreviewKeys())
+
+		first, ok := j.JSONLinesRowUID(0)
+		if assert.True(t, ok) {
+			assert.Equal(t, 0, j.JSONLinesRowIndex(first))
+			preview, found := j.JSONLinesRowPreview(first, "name")
+			assert.True(t, found)
+			assert.Equal(t, "Alpha", preview)
+
+			children := j.ChildUIDs(first)
+			assert.NotEmpty(t, children)
+			assert.Equal(t, 0, j.JSONLinesRowIndex(children[0]))
+		}
+
+		second, ok := j.JSONLinesRowUID(1)
+		if assert.True(t, ok) {
+			preview, found := j.JSONLinesRowPreview(second, "active")
+			assert.True(t, found)
+			assert.Equal(t, "false", preview)
+			_, found = j.JSONLinesRowPreview(second, "missing")
+			assert.False(t, found)
+		}
+	})
+
+	t.Run("keeps a regular JSON array as JSON", func(t *testing.T) {
+		j := jsondocument.New()
+		err := j.Load(context.Background(), jsondocument.MakeURIReadCloser(strings.NewReader(`[1, 2]`), "test.json"), binding.NewUntyped())
+		assert.NoError(t, err)
+		assert.False(t, j.IsJSONLines())
+		assert.Equal(t, 0, j.JSONLinesRowCount())
+		assert.Empty(t, j.JSONLinesPreviewKeys())
+	})
+
+	t.Run("recognizes a single-row jsonl file by extension", func(t *testing.T) {
+		j := jsondocument.New()
+		err := j.Load(context.Background(), jsondocument.MakeURIReadCloser(strings.NewReader(`{"name":"Only row"}`), "test.jsonl"), binding.NewUntyped())
+		assert.NoError(t, err)
+		assert.True(t, j.IsJSONLines())
+		assert.Equal(t, 1, j.JSONLinesRowCount())
+		assert.Equal(t, []string{"name"}, j.JSONLinesPreviewKeys())
+	})
+
+	t.Run("reports errors in later rows", func(t *testing.T) {
+		j := jsondocument.New()
+		data := "{\"id\":1}\n{not json}\n"
+		err := j.Load(context.Background(), jsondocument.MakeURIReadCloser(strings.NewReader(data), "test.jsonl"), binding.NewUntyped())
+		assert.Error(t, err)
 	})
 }
 

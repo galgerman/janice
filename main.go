@@ -62,7 +62,7 @@ func main() {
 // myUsage writes a custom usage message to configured output stream.
 func myUsage() {
 	s := "Usage: janice [options] [<inputfile>]\n\n" +
-		"A desktop app for viewing large JSON files.\n" +
+		"A desktop app for viewing large JSON and JSONL files.\n" +
 		"For more information please see: https://github.com/ErikKalkoken/janice\n\n" +
 		"Options:\n"
 	fmt.Fprint(flag.CommandLine.Output(), s)

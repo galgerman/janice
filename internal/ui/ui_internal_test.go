@@ -88,3 +88,39 @@ func TestCanLoadDocument(t *testing.T) {
 	<-ch
 	assert.Equal(t, 2, u.document.Size())
 }
+
+func TestCanLoadJSONLinesDocument(t *testing.T) {
+	a := test.NewTempApp(t)
+	u, err := NewUI(a)
+	assert.NoError(t, err)
+	u.window.Show()
+	x := jsondocument.MakeURIReadCloser(strings.NewReader("{\"name\":\"Alpha\"}\n{\"name\":\"Bravo\"}\n"), "dummy.jsonl")
+	ch := make(chan struct{})
+	u.loadDocument(x, func() {
+		close(ch)
+	})
+	<-ch
+
+	assert.True(t, u.document.IsJSONLines())
+	assert.False(t, u.jsonLinesBar.Hidden)
+	assert.Equal(t, []string{noJSONLinesPreview, "name"}, u.jsonLinesBar.previewKey.Options)
+	assert.Equal(t, 0, u.jsonLinesBar.currentRow)
+	assert.Equal(t, "Row 1 of 2", u.jsonLinesBar.rowIndicator.Text)
+	first, ok := u.document.JSONLinesRowUID(0)
+	assert.True(t, ok)
+	assert.Equal(t, first, u.selection.selectedUID)
+
+	u.jsonLinesBar.previewKey.SetSelected("name")
+	assert.Equal(t, "name", u.jsonLinesBar.selectedPreviewKey())
+	node := newTreeNode()
+	u.tree.UpdateNode(first, true, node)
+	assert.Equal(t, "[0] — Alpha :", node.key.Text)
+
+	u.jsonLinesBar.goToRow(1)
+	second, ok := u.document.JSONLinesRowUID(1)
+	assert.True(t, ok)
+	assert.Equal(t, second, u.selection.selectedUID)
+	assert.Equal(t, "Row 2 of 2", u.jsonLinesBar.rowIndicator.Text)
+	assert.False(t, u.jsonLinesBar.previous.Disabled())
+	assert.True(t, u.jsonLinesBar.next.Disabled())
+}

@@ -1,6 +1,6 @@
 # Janice
 
-A desktop app for viewing large JSON files.
+A desktop app for viewing large JSON and JSONL files.
 
 [![GitHub Release](https://img.shields.io/github/v/release/ErikKalkoken/janice)](https://github.com/ErikKalkoken/janice)
 [![Fyne](https://img.shields.io/badge/dynamic/regex?url=https%3A%2F%2Fgithub.com%2FErikKalkoken%2Fjanice%2Fblob%2Fmain%2Fgo.mod&search=fyne%5C.io%5C%2Ffyne%5C%2Fv2%20(v%5Cd*%5C.%5Cd*%5C.%5Cd*)&replace=%241&label=Fyne&cacheSeconds=https%3A%2F%2Fgithub.com%2Ffyne-io%2Ffyne)](https://github.com/fyne-io/fyne)
@@ -24,7 +24,8 @@ A desktop app for viewing large JSON files.
 Janice is a desktop app for viewing large JSON files. It's key features are:
 
 - Browse through a JSON document in classic tree structure
-- JSON files can be opened via file dialog, from clipboard, dropped on the window or given as command line argument
+- Browse JSONL records row by row and choose a key value to preview for each row
+- JSON and JSONL files can be opened via file dialog, from clipboard, dropped on the window or given as command line argument
 - Supports viewing very large JSON files (>100MB, >10M elements)
 - Search for keys and values in the document. Supports wildcards.
 - Export parts of a JSON file into a new file or to clipboard

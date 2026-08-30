@@ -71,6 +71,7 @@ type UI struct {
 	goBottom            *fyne.MenuItem
 	goSelection         *fyne.MenuItem
 	goTop               *fyne.MenuItem
+	jsonLinesBar        *jsonLinesBar
 	searchBar           *searchBar
 	selection           *selection
 	statusBar           *statusBar
@@ -95,7 +96,7 @@ func NewUI(app fyne.App) (*UI, error) {
 	// main frame
 	welcomeText := widget.NewLabel(
 		"Welcome to " + appName + ".\n" +
-			"Open a JSON file through the File Open menu\n" +
+			"Open a JSON or JSONL file through the File Open menu\n" +
 			"or drag and drop the file on this window\n" +
 			"or import from the clipboard.\n",
 	)
@@ -108,6 +109,7 @@ func NewUI(app fyne.App) (*UI, error) {
 	u.selection = newSelection(u)
 	u.statusBar = newStatusBar(u)
 	u.tree = newJSONTree(u)
+	u.jsonLinesBar = newJSONLinesBar(u)
 
 	if u.app.Preferences().BoolWithFallback(preferenceLastSelectionShown, false) {
 		u.selection.Show()
@@ -121,7 +123,7 @@ func NewUI(app fyne.App) (*UI, error) {
 	}
 
 	c := container.NewBorder(
-		container.NewVBox(u.searchBar, u.selection, u.detail, widget.NewSeparator()),
+		container.NewVBox(u.searchBar, u.jsonLinesBar, u.selection, u.detail, widget.NewSeparator()),
 		container.NewVBox(widget.NewSeparator(), u.statusBar),
 		nil,
 		nil,
@@ -163,6 +165,7 @@ func (u *UI) selectElement(uid string) {
 	u.selection.set(uid)
 	u.selection.enable()
 	u.detail.set(uid)
+	u.jsonLinesBar.syncSelection(uid)
 	u.fileExportFile.Disabled = false
 	u.fileExportClipboard.Disabled = false
 	u.window.MainMenu().Refresh()
@@ -302,6 +305,7 @@ func (u *UI) loadDocument(reader fyne.URIReadCloser, completed func()) {
 			u.currentFile = uri
 			u.selection.reset()
 			u.detail.reset()
+			u.jsonLinesBar.setDocument()
 			d2.Hide()
 		})
 	}()
@@ -567,7 +571,7 @@ func (u *UI) openFile() {
 	d.Show()
 	filterEnabled := u.app.Preferences().BoolWithFallback(settingExtensionFilter, settingExtensionDefault)
 	if filterEnabled {
-		f := storage.NewExtensionFileFilter([]string{".json"})
+		f := storage.NewExtensionFileFilter([]string{".json", ".jsonl"})
 		d.SetFilter(f)
 	}
 }
@@ -581,6 +585,7 @@ func (u *UI) newFile() {
 	u.toogleHasDocument(false)
 	u.selection.reset()
 	u.detail.reset()
+	u.jsonLinesBar.reset()
 }
 
 func (u *UI) reloadFile() {
