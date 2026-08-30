@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/theme"
 	"github.com/ErikKalkoken/janice/internal/jsondocument"
@@ -92,17 +93,25 @@ func TestMakeShortCut(t *testing.T) {
 		{"fileNew", "", fyne.KeyN, fyne.KeyModifierControl, false},
 		{"fileOpen", "", fyne.KeyO, fyne.KeyModifierControl, false},
 		{"fileReload", "", fyne.KeyR, fyne.KeyModifierAlt, false},
+		{"fileSave", "", fyne.KeyS, fyne.KeyModifierControl, false},
+		{"fileSaveAs", "", fyne.KeyS, fyne.KeyModifierControl | fyne.KeyModifierShift, false},
 		{"fileQuit", "", fyne.KeyQ, fyne.KeyModifierControl, false},
 		{"fileSettings", "", fyne.KeyComma, fyne.KeyModifierControl, false},
 		{"goBottom", "", fyne.KeyEnd, fyne.KeyModifierControl, false},
 		{"goTop", "", fyne.KeyHome, fyne.KeyModifierControl, false},
+		{"searchFind", "", fyne.KeyF, fyne.KeyModifierControl, false},
+		{"searchReplace", "", fyne.KeyH, fyne.KeyModifierControl, false},
 
 		{"fileNew", macOS, fyne.KeyN, fyne.KeyModifierSuper, false},
 		{"fileOpen", macOS, fyne.KeyO, fyne.KeyModifierSuper, false},
 		{"fileReload", macOS, fyne.KeyR, fyne.KeyModifierAlt, false},
+		{"fileSave", macOS, fyne.KeyS, fyne.KeyModifierSuper, false},
+		{"fileSaveAs", macOS, fyne.KeyS, fyne.KeyModifierSuper | fyne.KeyModifierShift, false},
 		{"fileSettings", macOS, fyne.KeyComma, fyne.KeyModifierSuper, false},
 		{"goBottom", macOS, fyne.KeyDown, fyne.KeyModifierSuper, false},
 		{"goTop", macOS, fyne.KeyUp, fyne.KeyModifierSuper, false},
+		{"searchFind", macOS, fyne.KeyF, fyne.KeyModifierSuper, false},
+		{"searchReplace", macOS, fyne.KeyH, fyne.KeyModifierSuper, false},
 
 		{"invalid", "", fyne.KeyN, fyne.KeyModifierControl, true},
 	}
@@ -121,6 +130,33 @@ func TestMakeShortCut(t *testing.T) {
 	}
 }
 
+func TestFindKeyHandler(t *testing.T) {
+	var directions []jsondocument.SearchDirection
+	h := findKeyHandler{onFind: func(direction jsondocument.SearchDirection) {
+		directions = append(directions, direction)
+	}}
+
+	h.keyDown(&fyne.KeyEvent{Name: fyne.KeyF3})
+	h.keyDown(&fyne.KeyEvent{Name: desktop.KeyShiftLeft})
+	h.keyDown(&fyne.KeyEvent{Name: fyne.KeyF3})
+	h.keyUp(&fyne.KeyEvent{Name: desktop.KeyShiftLeft})
+	h.keyDown(&fyne.KeyEvent{Name: fyne.KeyF3})
+
+	assert.Equal(t, []jsondocument.SearchDirection{
+		jsondocument.SearchForward,
+		jsondocument.SearchBackward,
+		jsondocument.SearchForward,
+	}, directions)
+}
+
+func TestReplaceAccordionStartsClosed(t *testing.T) {
+	a := test.NewTempApp(t)
+	u, err := NewUI(a)
+	assert.NoError(t, err)
+
+	assert.False(t, u.searchBar.replace.Items[0].Open)
+}
+
 func TestCanLoadDocument(t *testing.T) {
 	a := test.NewTempApp(t)
 	u, err := NewUI(a)
@@ -133,6 +169,23 @@ func TestCanLoadDocument(t *testing.T) {
 	})
 	<-ch
 	assert.Equal(t, 2, u.document.Size())
+	uid := u.document.ChildUIDs("")[0]
+	u.selectElement(uid)
+	assert.Equal(t, "alpha", u.detail.keyEntry.Text)
+	assert.Equal(t, "1", u.detail.valueEntry.Text)
+	assert.True(t, u.applyKeyEdit(uid, "beta"))
+	assert.True(t, u.applyValueEdit(uid, "2"))
+	assert.True(t, u.dirty)
+	assert.Equal(t, "beta", u.detail.keyEntry.Text)
+	assert.Equal(t, "2", u.detail.valueEntry.Text)
+	assert.Contains(t, u.window.Title(), "*")
+
+	u.searchBar.searchType.SetSelected(searchTypeNumber)
+	u.searchBar.searchEntry.SetText("2")
+	u.searchBar.replaceEntry.SetText("3")
+	u.searchBar.doReplaceAll()
+	assert.Equal(t, float64(3), u.document.Value(uid).Value)
+	assert.Equal(t, "Replaced 1 match", u.searchBar.result.Text)
 }
 
 func TestCanLoadJSONLinesDocument(t *testing.T) {

@@ -278,6 +278,41 @@ func TestJsonDocumentExtract(t *testing.T) {
 	})
 }
 
+func TestJSONDocumentEditingAndMarshal(t *testing.T) {
+	j := jsondocument.New()
+	err := j.Load(context.Background(), jsondocument.MakeURIReadCloser(strings.NewReader(`{"name":"Alpha","count":1,"active":true}`), "test.json"), binding.NewUntyped())
+	if !assert.NoError(t, err) {
+		return
+	}
+	children := j.ChildUIDs("")
+	byKey := make(map[string]string)
+	for _, uid := range children {
+		byKey[j.Value(uid).Key] = uid
+	}
+	assert.NoError(t, j.SetKey(byKey["name"], "title"))
+	assert.Error(t, j.SetKey(byKey["count"], "title"))
+	assert.NoError(t, j.SetScalarValue(byKey["name"], "Bravo"))
+	assert.NoError(t, j.SetScalarValue(byKey["count"], "2.5"))
+	assert.Error(t, j.SetScalarValue(byKey["active"], "yes"))
+	assert.NoError(t, j.SetScalarValue(byKey["active"], "false"))
+	text, ok := j.ScalarText(byKey["count"])
+	assert.True(t, ok)
+	assert.Equal(t, "2.5", text)
+
+	got, err := j.Marshal()
+	assert.NoError(t, err)
+	assert.JSONEq(t, `{"title":"Bravo","count":2.5,"active":false}`, string(got))
+}
+
+func TestJSONLinesMarshal(t *testing.T) {
+	j := jsondocument.New()
+	err := j.Load(context.Background(), jsondocument.MakeURIReadCloser(strings.NewReader("{\"id\":1}\n{\"id\":2}\n"), "test.jsonl"), binding.NewUntyped())
+	assert.NoError(t, err)
+	got, err := j.Marshal()
+	assert.NoError(t, err)
+	assert.Equal(t, "{\"id\":1}\n{\"id\":2}\n", string(got))
+}
+
 func TestJSONType(t *testing.T) {
 	cases := []struct {
 		typ  jsondocument.JSONType
@@ -422,6 +457,31 @@ func TestJsonDocumentSearchValue(t *testing.T) {
 		})
 	}
 
+}
+
+func TestSearchPreviousAndReplace(t *testing.T) {
+	j := jsondocument.New()
+	err := j.Load(context.Background(), jsondocument.MakeURIReadCloser(strings.NewReader(`{"first":"same","second":"same","count":1}`), "test.json"), binding.NewUntyped())
+	assert.NoError(t, err)
+	idsByKey := make(map[string]string)
+	for _, uid := range j.ChildUIDs("") {
+		idsByKey[j.Value(uid).Key] = uid
+	}
+	firstID, secondID, countID := idsByKey["first"], idsByKey["second"], idsByKey["count"]
+
+	got, err := j.SearchDirection(context.Background(), secondID, "same", jsondocument.SearchString, jsondocument.SearchBackward)
+	assert.NoError(t, err)
+	assert.Equal(t, firstID, got)
+	got, err = j.SearchDirection(context.Background(), "", "same", jsondocument.SearchString, jsondocument.SearchBackward)
+	assert.NoError(t, err)
+	assert.Equal(t, secondID, got)
+
+	count, err := j.ReplaceAll(context.Background(), "same", jsondocument.SearchString, "changed")
+	assert.NoError(t, err)
+	assert.Equal(t, 2, count)
+	assert.Equal(t, "changed", j.Value(firstID).Value)
+	assert.NoError(t, j.Replace(countID, jsondocument.SearchNumber, "2"))
+	assert.Equal(t, float64(2), j.Value(countID).Value)
 }
 
 func makeDataReader(data any) fyne.URIReadCloser {

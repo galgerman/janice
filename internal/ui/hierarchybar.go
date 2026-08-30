@@ -25,6 +25,10 @@ func newHierarchyBar(u *UI) *hierarchyBar {
 }
 
 func (w *hierarchyBar) set(uid widget.TreeNodeID) {
+	w.label.SetText("Hierarchy: " + w.path(uid))
+}
+
+func (w *hierarchyBar) path(uid widget.TreeNodeID) string {
 	keys := make([]string, 0)
 	for _, pathUID := range append(w.u.document.Path(uid), uid) {
 		key := w.u.document.Value(pathUID).Key
@@ -33,7 +37,7 @@ func (w *hierarchyBar) set(uid widget.TreeNodeID) {
 		}
 		keys = append(keys, key)
 	}
-	w.label.SetText("Hierarchy: " + formatHierarchy(keys))
+	return formatHierarchy(keys)
 }
 
 func formatHierarchy(rawKeys []string) string {

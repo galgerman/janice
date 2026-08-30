@@ -5,6 +5,7 @@ import (
 	"strconv"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/widget"
 	"github.com/ErikKalkoken/janice/internal/jsondocument"
 )
@@ -12,11 +13,13 @@ import (
 // jsonTree shows a JSON document in a tree structure.
 type jsonTree struct {
 	widget.Tree
-	u *UI
+	findKeys findKeyHandler
+	u        *UI
 }
 
 func newJSONTree(u *UI) *jsonTree {
 	w := &jsonTree{u: u}
+	w.findKeys.onFind = u.searchBar.doSearchDirection
 	w.ExtendBaseWidget(w)
 
 	w.ChildUIDs = func(id widget.TreeNodeID) []widget.TreeNodeID {
@@ -91,18 +94,46 @@ func newJSONTree(u *UI) *jsonTree {
 	return w
 }
 
+func (w *jsonTree) KeyDown(event *fyne.KeyEvent) {
+	w.findKeys.keyDown(event)
+}
+
+func (w *jsonTree) KeyUp(event *fyne.KeyEvent) {
+	w.findKeys.keyUp(event)
+}
+
+var _ desktop.Keyable = (*jsonTree)(nil)
+
 func (w *jsonTree) showPreviewKeyMenu(node *treeNode, event *fyne.PointEvent) {
-	path, ok := w.u.document.PreviewPath(node.uid)
-	if !ok {
-		return
+	uid := node.uid
+	n := w.u.document.Value(uid)
+	items := []*fyne.MenuItem{
+		fyne.NewMenuItem("Copy key", func() { w.u.app.Clipboard().SetContent(n.Key) }),
 	}
-	label := "Add to row key preview options"
-	action := func() { w.u.jsonLinesBar.addPreviewKey(path) }
-	if w.u.jsonLinesBar.hasPreviewKey(path) {
-		label = "Remove from row key preview options"
-		action = func() { w.u.jsonLinesBar.removePreviewKey(path) }
+	if value, ok := w.u.document.ScalarText(uid); ok {
+		items = append(items, fyne.NewMenuItem("Copy value", func() { w.u.app.Clipboard().SetContent(value) }))
 	}
-	menu := widget.NewPopUpMenu(fyne.NewMenu("", fyne.NewMenuItem(label, action)), w.u.window.Canvas())
+	items = append(items, fyne.NewMenuItem("Copy hierarchy path", func() {
+		w.u.app.Clipboard().SetContent(w.u.hierarchy.path(uid))
+	}))
+	if w.u.document.CanSetKey(uid) {
+		items = append(items, fyne.NewMenuItemSeparator(), fyne.NewMenuItem("Edit key...", func() { w.u.editKey(uid) }))
+	}
+	if _, ok := w.u.document.ScalarText(uid); ok {
+		items = append(items, fyne.NewMenuItem("Edit value...", func() { w.u.editValue(uid) }))
+	}
+	if w.u.document.IsJSONLines() {
+		if path, ok := w.u.document.PreviewPath(uid); ok {
+			label := "Add to row key preview options"
+			action := func() { w.u.jsonLinesBar.addPreviewKey(path) }
+			if w.u.jsonLinesBar.hasPreviewKey(path) {
+				label = "Remove from row key preview options"
+				action = func() { w.u.jsonLinesBar.removePreviewKey(path) }
+			}
+			items = append(items, fyne.NewMenuItemSeparator(), fyne.NewMenuItem(label, action))
+		}
+	}
+	menu := widget.NewPopUpMenu(fyne.NewMenu("", items...), w.u.window.Canvas())
 	menu.ShowAtPosition(event.AbsolutePosition)
 }
 

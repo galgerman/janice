@@ -79,6 +79,14 @@ const (
 	SearchKeyword
 )
 
+// SearchDirection controls traversal through search matches.
+type SearchDirection int
+
+const (
+	SearchForward  SearchDirection = 1
+	SearchBackward SearchDirection = -1
+)
+
 // ProgressInfo represents the current progress while loading a document
 // and is used to communicate the the UI.
 type ProgressInfo struct {
@@ -144,6 +152,121 @@ func (j *JSONDocument) IsBranch(uid widget.TreeNodeID) bool {
 func (j *JSONDocument) Value(uid widget.TreeNodeID) Node {
 	id := uid2id(uid)
 	return j.values[id]
+}
+
+// SetKey renames an object property. Array indexes and the document root cannot
+// be renamed.
+func (j *JSONDocument) SetKey(uid widget.TreeNodeID, key string) error {
+	id := uid2id(uid)
+	key = strings.TrimSpace(key)
+	if id <= 0 || key == "" {
+		return fmt.Errorf("key can not be empty")
+	}
+	parentID := j.parents[id]
+	if parentID < 0 || j.values[parentID].Type != Object {
+		return fmt.Errorf("only object keys can be renamed")
+	}
+	for _, siblingID := range j.ids[parentID] {
+		if siblingID != id && j.values[siblingID].Key == key {
+			return fmt.Errorf("key %q already exists", key)
+		}
+	}
+	j.values[id].Key = key
+	return nil
+}
+
+// CanSetKey reports whether a node is an object property that can be renamed.
+func (j *JSONDocument) CanSetKey(uid widget.TreeNodeID) bool {
+	id := uid2id(uid)
+	if id <= 0 || int(id) >= len(j.parents) {
+		return false
+	}
+	parentID := j.parents[id]
+	return parentID >= 0 && j.values[parentID].Type == Object
+}
+
+// SetScalarValue updates a scalar node from its textual representation while
+// preserving the node's JSON type.
+func (j *JSONDocument) SetScalarValue(uid widget.TreeNodeID, value string) error {
+	id := uid2id(uid)
+	if id < 0 || int(id) >= len(j.values) {
+		return fmt.Errorf("invalid node")
+	}
+	n := &j.values[id]
+	switch n.Type {
+	case String:
+		n.Value = value
+	case Number:
+		x, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+		if err != nil {
+			return fmt.Errorf("invalid number: %w", err)
+		}
+		n.Value = x
+	case Boolean:
+		x, err := strconv.ParseBool(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("boolean must be true or false")
+		}
+		n.Value = x
+	case Null:
+		if strings.TrimSpace(value) != "null" {
+			return fmt.Errorf("null value must remain null")
+		}
+		n.Value = nil
+	default:
+		return fmt.Errorf("arrays and objects can not be edited as values")
+	}
+	return nil
+}
+
+// ScalarText returns the unquoted text representation of a scalar node.
+func (j *JSONDocument) ScalarText(uid widget.TreeNodeID) (string, bool) {
+	n := j.Value(uid)
+	switch n.Type {
+	case String:
+		return n.Value.(string), true
+	case Number:
+		return strconv.FormatFloat(n.Value.(float64), 'f', -1, 64), true
+	case Boolean:
+		return strconv.FormatBool(n.Value.(bool)), true
+	case Null:
+		return "null", true
+	default:
+		return "", false
+	}
+}
+
+// Marshal serializes the complete document. JSON Lines documents are emitted
+// as one compact JSON value per line.
+func (j *JSONDocument) Marshal() ([]byte, error) {
+	if j.n == 0 {
+		return nil, fmt.Errorf("document is empty")
+	}
+	if j.isJSONLines {
+		var result strings.Builder
+		for _, rowID := range j.ids[0] {
+			data, err := json.Marshal(j.extractValue(rowID))
+			if err != nil {
+				return nil, err
+			}
+			result.Write(data)
+			result.WriteByte('\n')
+		}
+		return []byte(result.String()), nil
+	}
+	return json.MarshalIndent(j.extractValue(0), "", "  ")
+}
+
+func (j *JSONDocument) extractValue(id int32) any {
+	n := j.values[id]
+	switch n.Type {
+	case Array:
+		return j.extractArray(id)
+	case Object:
+		return j.extractObject(id)
+	default:
+		return n.Value
+	}
 }
 
 // Load loads JSON data from a reader and builds a new JSON document from it.
@@ -591,47 +714,106 @@ func (j *JSONDocument) setProgressInfo(info ProgressInfo) error {
 	return nil
 }
 
-// Search returns the next node with a matching key or an error if not found or canceled.
-// The starting node will be ignored, so that is is possible to find successive nodes with the same key.
-// The search direction is from top to bottom.
+// Search returns the next node with a matching key or value.
 func (j *JSONDocument) Search(ctx context.Context, uid widget.TreeNodeID, search string, typ SearchType) (widget.TreeNodeID, error) {
+	return j.SearchDirection(ctx, uid, search, typ, SearchForward)
+}
+
+// SearchDirection returns the next matching node in the requested direction.
+// The starting node is ignored so successive calls navigate distinct matches.
+func (j *JSONDocument) SearchDirection(ctx context.Context, uid widget.TreeNodeID, search string, typ SearchType, direction SearchDirection) (widget.TreeNodeID, error) {
 	if search == "" {
 		return "", ErrNotFound
 	}
-	id := uid2id(uid)
-	startID := id
 	pattern, err := regexp.Compile(wildCardToRegexp(search))
 	if err != nil {
 		return "", err
 	}
-
-	for {
-		foundID, err := j.searchNode(ctx, id, pattern, typ)
-		if err != nil {
-			return "", err
+	ids := j.flattenIDs(0)
+	start := slices.Index(ids, uid2id(uid))
+	if direction == SearchBackward {
+		if uid == "" {
+			start = len(ids)
 		}
-		if foundID != startID && foundID != notFound {
-			return id2uid(foundID), nil
-		}
-		for {
-			parentID := j.parents[id]
-			childIDs := j.ids[parentID]
-			idx := slices.Index(childIDs, id)
-			if idx < len(childIDs)-1 {
-				id = childIDs[idx+1]
-				break
-			}
-			if parentID == rootNodeParentID || j.parents[parentID] == rootNodeParentID {
-				return "", ErrNotFound
-			}
-			id = parentID
-			select {
-			case <-ctx.Done():
+		for i := start - 1; i >= 0; i-- {
+			if err := ctx.Err(); err != nil {
 				return "", ErrCallerCanceled
-			default:
 			}
+			if j.matches(ids[i], pattern, typ) {
+				return id2uid(ids[i]), nil
+			}
+		}
+		return "", ErrNotFound
+	}
+	for i := start + 1; i < len(ids); i++ {
+		if err := ctx.Err(); err != nil {
+			return "", ErrCallerCanceled
+		}
+		if j.matches(ids[i], pattern, typ) {
+			return id2uid(ids[i]), nil
 		}
 	}
+	return "", ErrNotFound
+}
+
+func (j *JSONDocument) flattenIDs(id int32) []int32 {
+	result := []int32{id}
+	for _, childID := range j.ids[id] {
+		result = append(result, j.flattenIDs(childID)...)
+	}
+	return result
+}
+
+func (j *JSONDocument) matches(id int32, pattern *regexp.Regexp, typ SearchType) bool {
+	n := j.values[id]
+	switch typ {
+	case SearchKey:
+		return pattern.MatchString(n.Key)
+	case SearchKeyword:
+		if n.Type == Boolean {
+			return pattern.MatchString(strconv.FormatBool(n.Value.(bool)))
+		}
+		return n.Type == Null && pattern.MatchString("null")
+	case SearchNumber:
+		return n.Type == Number && pattern.MatchString(strconv.FormatFloat(n.Value.(float64), 'f', -1, 64))
+	case SearchString:
+		return n.Type == String && pattern.MatchString(n.Value.(string))
+	default:
+		return false
+	}
+}
+
+// Replace updates a matching key or scalar node with replacement text.
+func (j *JSONDocument) Replace(uid widget.TreeNodeID, typ SearchType, replacement string) error {
+	if typ == SearchKey {
+		return j.SetKey(uid, replacement)
+	}
+	return j.SetScalarValue(uid, replacement)
+}
+
+// ReplaceAll replaces all matches and returns the number changed.
+func (j *JSONDocument) ReplaceAll(ctx context.Context, search string, typ SearchType, replacement string) (int, error) {
+	if search == "" {
+		return 0, ErrNotFound
+	}
+	pattern, err := regexp.Compile(wildCardToRegexp(search))
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, id := range j.flattenIDs(0) {
+		if err := ctx.Err(); err != nil {
+			return count, ErrCallerCanceled
+		}
+		if !j.matches(id, pattern, typ) {
+			continue
+		}
+		if err := j.Replace(id2uid(id), typ, replacement); err != nil {
+			return count, err
+		}
+		count++
+	}
+	return count, nil
 }
 
 func (j *JSONDocument) searchNode(ctx context.Context, id int32, pattern *regexp.Regexp, typ SearchType) (int32, error) {
@@ -744,17 +926,7 @@ func (j *JSONDocument) Extract(uid widget.TreeNodeID) ([]byte, error) {
 func (j *JSONDocument) extractArray(id int32) []any {
 	data := make([]any, len(j.ids[id]))
 	for i, childID := range j.ids[id] {
-		n := j.values[childID]
-		var v any
-		switch n.Type {
-		case Array:
-			v = j.extractArray(childID)
-		case Object:
-			v = j.extractObject(childID)
-		default:
-			v = n.Value
-		}
-		data[i] = v
+		data[i] = j.extractValue(childID)
 	}
 	return data
 }
@@ -763,16 +935,7 @@ func (j *JSONDocument) extractObject(id int32) map[string]any {
 	data := make(map[string]any)
 	for _, childID := range j.ids[id] {
 		n := j.values[childID]
-		var v any
-		switch n.Type {
-		case Array:
-			v = j.extractArray(childID)
-		case Object:
-			v = j.extractObject(childID)
-		default:
-			v = n.Value
-		}
-		data[n.Key] = v
+		data[n.Key] = j.extractValue(childID)
 	}
 	return data
 }

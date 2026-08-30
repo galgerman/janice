@@ -72,13 +72,17 @@ const (
 type UI struct {
 	app                 fyne.App
 	currentFile         fyne.URI
+	currentName         string
 	detail              *detail
+	dirty               bool
 	document            *jsondocument.JSONDocument
 	fileExportClipboard *fyne.MenuItem
 	fileExportFile      *fyne.MenuItem
 	fileNew             *fyne.MenuItem
 	fileOpenRecent      *fyne.MenuItem
 	fileReload          *fyne.MenuItem
+	fileSave            *fyne.MenuItem
+	fileSaveAs          *fyne.MenuItem
 	goBottom            *fyne.MenuItem
 	goSelection         *fyne.MenuItem
 	goTop               *fyne.MenuItem
@@ -149,6 +153,7 @@ func NewUI(app fyne.App) (*UI, error) {
 
 	u.window.SetContent(fynetooltip.AddWindowToolTipLayer(c, u.window.Canvas()))
 	u.window.SetMainMenu(u.makeMenu())
+	u.registerSearchShortcuts()
 	u.toogleHasDocument(false)
 	u.updateRecentFilesMenu()
 	u.window.SetMaster()
@@ -177,6 +182,22 @@ func NewUI(app fyne.App) (*UI, error) {
 		app.Preferences().SetBool(preferenceLastSelectionShown, !u.selection.Hidden)
 	})
 	return u, nil
+}
+
+func (u *UI) registerSearchShortcuts() {
+	shortcuts := []struct {
+		shortcut *desktop.CustomShortcut
+		action   func()
+	}{
+		{mustMakeShortCut("searchFind", runtime.GOOS), func() { u.window.Canvas().Focus(u.searchBar.searchEntry) }},
+		{mustMakeShortCut("searchReplace", runtime.GOOS), func() {
+			u.searchBar.replace.Open(0)
+			u.window.Canvas().Focus(u.searchBar.replaceEntry)
+		}},
+	}
+	for _, item := range shortcuts {
+		u.window.Canvas().AddShortcut(item.shortcut, func(fyne.Shortcut) { item.action() })
+	}
 }
 
 func (u *UI) selectElement(uid string) {
@@ -225,6 +246,9 @@ func (u *UI) setTitle(fileName string) {
 	var s string
 	name := u.app.Metadata().Name
 	if fileName != "" {
+		if u.dirty {
+			fileName = "*" + fileName
+		}
 		s = fmt.Sprintf("%s - %s", fileName, name)
 	} else {
 		s = name
@@ -320,8 +344,10 @@ func (u *UI) loadDocument(reader fyne.URIReadCloser, completed func()) {
 			if uri.Scheme() == "file" {
 				u.addRecentFile(uri)
 			}
-			u.setTitle(uri.Name())
 			u.currentFile = uri
+			u.currentName = uri.Name()
+			u.dirty = false
+			u.setTitle(u.currentName)
 			u.selection.reset()
 			u.detail.reset()
 			u.jsonLinesBar.setDocument()
@@ -337,6 +363,8 @@ func (u *UI) toogleHasDocument(enabled bool) {
 		u.fileExportFile.Disabled = u.selection.selectedUID == ""
 		u.fileNew.Disabled = false
 		u.fileReload.Disabled = false
+		u.fileSave.Disabled = false
+		u.fileSaveAs.Disabled = false
 		u.goBottom.Disabled = false
 		u.goSelection.Disabled = false
 		u.goTop.Disabled = false
@@ -349,6 +377,8 @@ func (u *UI) toogleHasDocument(enabled bool) {
 		u.fileExportFile.Disabled = true
 		u.fileNew.Disabled = true
 		u.fileReload.Disabled = true
+		u.fileSave.Disabled = true
+		u.fileSaveAs.Disabled = true
 		u.goBottom.Disabled = true
 		u.goSelection.Disabled = true
 		u.goTop.Disabled = true
@@ -503,6 +533,12 @@ func (u *UI) makeMenu() *fyne.MainMenu {
 	u.fileReload = fyne.NewMenuItem("Reload", u.reloadFile)
 	u.fileReload.Shortcut = mustMakeShortCut("fileReload", runtime.GOOS)
 	u.window.Canvas().AddShortcut(addShortcutFromMenuItem(u.fileReload))
+	u.fileSave = fyne.NewMenuItem("Save", u.saveFile)
+	u.fileSave.Shortcut = mustMakeShortCut("fileSave", runtime.GOOS)
+	u.window.Canvas().AddShortcut(addShortcutFromMenuItem(u.fileSave))
+	u.fileSaveAs = fyne.NewMenuItem("Save As...", u.saveFileAs)
+	u.fileSaveAs.Shortcut = mustMakeShortCut("fileSaveAs", runtime.GOOS)
+	u.window.Canvas().AddShortcut(addShortcutFromMenuItem(u.fileSaveAs))
 
 	fileOpen := fyne.NewMenuItem("Open File...", u.openFile)
 	fileOpen.Shortcut = mustMakeShortCut("fileOpen", runtime.GOOS)
@@ -556,6 +592,8 @@ func (u *UI) makeMenu() *fyne.MainMenu {
 			u.loadDocument(reader, nil)
 		}),
 		u.fileReload,
+		u.fileSave,
+		u.fileSaveAs,
 		fyne.NewMenuItemSeparator(),
 		u.fileExportFile,
 		u.fileExportClipboard,
@@ -655,6 +693,9 @@ func (u *UI) openFile() {
 // newFile resets the app to it's initial state
 func (u *UI) newFile() {
 	u.document.Reset()
+	u.currentFile = nil
+	u.currentName = ""
+	u.dirty = false
 	u.setTitle("")
 	u.statusBar.reset()
 	u.welcomeMessage.Show()
@@ -663,6 +704,122 @@ func (u *UI) newFile() {
 	u.hierarchy.reset()
 	u.detail.reset()
 	u.jsonLinesBar.reset()
+}
+
+func (u *UI) applyKeyEdit(uid widget.TreeNodeID, key string) bool {
+	if err := u.document.SetKey(uid, key); err != nil {
+		u.showErrorDialog("Failed to edit key", err)
+		return false
+	}
+	u.markDirty()
+	u.refreshEditedNode(uid)
+	return true
+}
+
+func (u *UI) applyValueEdit(uid widget.TreeNodeID, value string) bool {
+	if err := u.document.SetScalarValue(uid, value); err != nil {
+		u.showErrorDialog("Failed to edit value", err)
+		return false
+	}
+	u.markDirty()
+	u.refreshEditedNode(uid)
+	return true
+}
+
+func (u *UI) refreshEditedNode(uid widget.TreeNodeID) {
+	u.tree.RefreshItem(uid)
+	u.selection.set(uid)
+	u.detail.set(uid)
+	u.hierarchy.set(uid)
+}
+
+func (u *UI) markDirty() {
+	u.dirty = true
+	u.setTitle(u.currentName)
+}
+
+func (u *UI) editKey(uid widget.TreeNodeID) {
+	entry := widget.NewEntry()
+	entry.SetText(u.document.Value(uid).Key)
+	d := dialog.NewForm("Edit key", "Apply", "Cancel", []*widget.FormItem{{Text: "Key", Widget: entry}}, func(ok bool) {
+		if ok {
+			u.applyKeyEdit(uid, entry.Text)
+		}
+	}, u.window)
+	kxdialog.AddDialogKeyHandler(d, u.window)
+	d.Show()
+}
+
+func (u *UI) editValue(uid widget.TreeNodeID) {
+	value, ok := u.document.ScalarText(uid)
+	if !ok {
+		return
+	}
+	entry := widget.NewMultiLineEntry()
+	entry.SetText(value)
+	d := dialog.NewForm("Edit value", "Apply", "Cancel", []*widget.FormItem{{Text: "Value", Widget: entry}}, func(ok bool) {
+		if ok {
+			u.applyValueEdit(uid, entry.Text)
+		}
+	}, u.window)
+	kxdialog.AddDialogKeyHandler(d, u.window)
+	d.Show()
+}
+
+func (u *UI) saveFile() {
+	if u.currentFile == nil || u.currentFile.Scheme() != "file" {
+		u.saveFileAs()
+		return
+	}
+	writer, err := storage.Writer(u.currentFile)
+	if err != nil {
+		u.showErrorDialog("Failed to save file", err)
+		return
+	}
+	u.writeDocument(writer)
+}
+
+func (u *UI) saveFileAs() {
+	d := dialog.NewFileSave(func(writer fyne.URIWriteCloser, err error) {
+		if err != nil {
+			u.showErrorDialog("Failed to open save dialog", err)
+			return
+		}
+		if writer == nil {
+			return
+		}
+		uri := writer.URI()
+		if u.writeDocument(writer) {
+			u.currentFile = uri
+			u.currentName = uri.Name()
+			u.setTitle(u.currentName)
+			u.addRecentFile(uri)
+		}
+	}, u.window)
+	if u.currentName != "" {
+		d.SetFileName(u.currentName)
+	}
+	d.SetFilter(storage.NewExtensionFileFilter([]string{".json", ".jsonl"}))
+	kxdialog.AddDialogKeyHandler(d, u.window)
+	d.Show()
+}
+
+func (u *UI) writeDocument(writer fyne.URIWriteCloser) bool {
+	data, err := u.document.Marshal()
+	if err == nil {
+		_, err = writer.Write(data)
+	}
+	closeErr := writer.Close()
+	if err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		u.showErrorDialog("Failed to save file", err)
+		return false
+	}
+	u.dirty = false
+	u.setTitle(u.currentName)
+	return true
 }
 
 func (u *UI) reloadFile() {
@@ -816,6 +973,14 @@ func makeShortCut(name, goos string) (*desktop.CustomShortcut, error) {
 		"fileReload": {
 			"": {fyne.KeyR, fyne.KeyModifierAlt},
 		},
+		"fileSave": {
+			"":    {fyne.KeyS, fyne.KeyModifierControl},
+			macOS: {fyne.KeyS, fyne.KeyModifierSuper},
+		},
+		"fileSaveAs": {
+			"":    {fyne.KeyS, fyne.KeyModifierControl | fyne.KeyModifierShift},
+			macOS: {fyne.KeyS, fyne.KeyModifierSuper | fyne.KeyModifierShift},
+		},
 		"fileSettings": {
 			"":    {fyne.KeyComma, fyne.KeyModifierControl},
 			macOS: {fyne.KeyComma, fyne.KeyModifierSuper},
@@ -827,6 +992,14 @@ func makeShortCut(name, goos string) (*desktop.CustomShortcut, error) {
 		"goTop": {
 			"":    {fyne.KeyHome, fyne.KeyModifierControl},
 			macOS: {fyne.KeyUp, fyne.KeyModifierSuper},
+		},
+		"searchFind": {
+			"":    {fyne.KeyF, fyne.KeyModifierControl},
+			macOS: {fyne.KeyF, fyne.KeyModifierSuper},
+		},
+		"searchReplace": {
+			"":    {fyne.KeyH, fyne.KeyModifierControl},
+			macOS: {fyne.KeyH, fyne.KeyModifierSuper},
 		},
 	}
 	sc, ok := m[name]
