@@ -39,6 +39,7 @@ func newStatusBar(u *UI) *statusBar {
 	}
 	w.ExtendBaseWidget(w)
 	w.elementsCount.SetToolTip("Total count of elements in the JSON document")
+	w.elementsCount.Importance = widget.LowImportance
 	w.updateLink.Hide()
 	notifyUpdates := w.u.app.Preferences().BoolWithFallback(settingNotifyUpdates, settingNotifyUpdatesDefault)
 	if notifyUpdates {

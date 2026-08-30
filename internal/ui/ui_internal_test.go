@@ -10,6 +10,8 @@ import (
 	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/theme"
+	"fyne.io/fyne/v2/widget"
+	kxtheme "github.com/ErikKalkoken/fyne-kx/theme"
 	"github.com/ErikKalkoken/janice/internal/jsondocument"
 	"github.com/stretchr/testify/assert"
 )
@@ -64,6 +66,42 @@ func TestThemeScalesTextOnly(t *testing.T) {
 	scaled := readableDisabledTheme{Theme: base, textScale: 1.2}
 	assert.InDelta(t, base.Size(theme.SizeNameText)*1.2, scaled.Size(theme.SizeNameText), 0.001)
 	assert.Equal(t, base.Size(theme.SizeNamePadding), scaled.Size(theme.SizeNamePadding))
+}
+
+func TestThemeUsesModernAccentAndRoundedInputs(t *testing.T) {
+	th := readableDisabledTheme{Theme: theme.DefaultTheme()}
+	assert.Equal(t, accentDark, th.Color(theme.ColorNamePrimary, theme.VariantDark))
+	assert.Equal(t, accentLight, th.Color(theme.ColorNamePrimary, theme.VariantLight))
+	assert.Equal(t, float32(8), th.Size(theme.SizeNameInputRadius))
+}
+
+func TestThemeFollowsPinnedVariantNotSystemVariant(t *testing.T) {
+	pinnedDark := readableDisabledTheme{Theme: kxtheme.DefaultWithFixedVariant(theme.VariantDark)}
+	assert.Equal(t, accentDark, pinnedDark.Color(theme.ColorNamePrimary, theme.VariantLight))
+	assert.Equal(t, color.NRGBA{R: 0x15, G: 0x17, B: 0x1d, A: 0xff}, pinnedDark.Color(theme.ColorNameBackground, theme.VariantLight))
+
+	pinnedLight := readableDisabledTheme{Theme: kxtheme.DefaultWithFixedVariant(theme.VariantLight)}
+	assert.Equal(t, accentLight, pinnedLight.Color(theme.ColorNamePrimary, theme.VariantDark))
+}
+
+func TestChromeDrawsThemedGradientAndEdge(t *testing.T) {
+	test.NewTempApp(t)
+	th := fyne.CurrentApp().Settings().Theme()
+	variant := fyne.CurrentApp().Settings().ThemeVariant()
+	thickness := th.Size(theme.SizeNameSeparatorThickness)
+
+	bottom := newChrome(edgeBottom, widget.NewLabel("content")).CreateRenderer().(*chromeRenderer)
+	assert.Equal(t, th.Color(theme.ColorNameMenuBackground, variant), bottom.gradient.StartColor)
+	assert.Equal(t, th.Color(theme.ColorNameBackground, variant), bottom.gradient.EndColor)
+	assert.Equal(t, th.Color(theme.ColorNameSeparator, variant), bottom.line.FillColor)
+	bottom.Layout(fyne.NewSize(100, 40))
+	assert.Equal(t, 40-thickness, bottom.line.Position().Y)
+
+	top := newChrome(edgeTop, widget.NewLabel("content")).CreateRenderer().(*chromeRenderer)
+	assert.Equal(t, th.Color(theme.ColorNameBackground, variant), top.gradient.StartColor)
+	assert.Equal(t, th.Color(theme.ColorNameMenuBackground, variant), top.gradient.EndColor)
+	top.Layout(fyne.NewSize(100, 40))
+	assert.Equal(t, float32(0), top.line.Position().Y)
 }
 
 func TestViewOptionsUpdatePreferences(t *testing.T) {

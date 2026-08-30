@@ -145,8 +145,8 @@ func NewUI(app fyne.App) (*UI, error) {
 	}
 
 	c := container.NewBorder(
-		container.NewVBox(u.searchBar, u.jsonLinesBar, u.selection, u.detail, u.hierarchy, widget.NewSeparator()),
-		container.NewVBox(widget.NewSeparator(), u.statusBar),
+		newChrome(edgeBottom, container.NewVBox(u.searchBar, u.jsonLinesBar, u.selection, u.detail, u.hierarchy)),
+		newChrome(edgeTop, u.statusBar),
 		nil,
 		nil,
 		container.NewStack(u.welcomeMessage, u.tree))

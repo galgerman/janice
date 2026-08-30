@@ -152,6 +152,7 @@ func newSearchBar(u *UI) *searchBar {
 	)
 	w.replace = widget.NewAccordion(widget.NewAccordionItem("Replace", replaceRow))
 	w.result = widget.NewLabel("")
+	w.result.Importance = widget.LowImportance
 	w.scrollBottom = ttwidget.NewButtonWithIcon("", theme.NewThemedResource(resourceVerticalalignbottomSvg), func() {
 		w.u.tree.ScrollToBottom()
 	})
