@@ -34,25 +34,36 @@ const (
 	colorThemeAuto         = "Automatic"
 	colorThemeLight        = "Light"
 	colorThemeDark         = "Dark"
+	fontSizeSmall          = "Small"
+	fontSizeDefault        = "Default"
+	fontSizeLarge          = "Large"
+	fontSizeExtraLarge     = "Extra large"
 	preferencesRecentFiles = "recent-files"
 	websiteURL             = "https://github.com/ErikKalkoken/janice"
 )
 
 // preference keys
 const (
-	preferenceLastDetailShown    = "last-value-frame-shown"
-	preferenceLastSelectionShown = "last-selection-frame-shown"
-	preferenceLastWindowHeight   = "last-window-height"
-	preferenceLastWindowWidth    = "last-window-width"
+	preferenceLastDetailShown          = "last-value-frame-shown"
+	preferenceJSONLinesPreviewKeys     = "json-lines-preview-keys"
+	preferenceJSONLinesSelectedPreview = "json-lines-selected-preview"
+	preferenceLastSelectionShown       = "last-selection-frame-shown"
+	preferenceLastWindowHeight         = "last-window-height"
+	preferenceLastWindowWidth          = "last-window-width"
 )
 
 // setting keys and defaults
 const (
 	settingColorTheme             = "color-theme"
+	settingCompactTree            = "compact-tree"
 	settingExtensionDefault       = true
 	settingExtensionFilter        = "extension-filter"
+	settingFontSize               = "font-size"
+	settingFontSizeDefault        = fontSizeDefault
 	settingNotifyUpdates          = "notify-updates"
 	settingNotifyUpdatesDefault   = true
+	settingShowHierarchy          = "show-hierarchy"
+	settingShowHierarchyDefault   = true
 	settingRecentFileCount        = "recent-file-count"
 	settingRecentFileCountDefault = 5
 )
@@ -71,13 +82,16 @@ type UI struct {
 	goBottom            *fyne.MenuItem
 	goSelection         *fyne.MenuItem
 	goTop               *fyne.MenuItem
+	hierarchy           *hierarchyBar
 	jsonLinesBar        *jsonLinesBar
 	searchBar           *searchBar
 	selection           *selection
 	statusBar           *statusBar
 	tree                *jsonTree
 	viewCollapseAll     *fyne.MenuItem
+	viewCompactTree     *fyne.MenuItem
 	viewExpandAll       *fyne.MenuItem
+	viewShowHierarchy   *fyne.MenuItem
 	viewShowDetail      *fyne.MenuItem
 	viewShowSelection   *fyne.MenuItem
 	welcomeMessage      *fyne.Container
@@ -105,11 +119,15 @@ func NewUI(app fyne.App) (*UI, error) {
 	u.welcomeMessage = container.NewCenter(welcomeText)
 
 	u.detail = newDetail(u)
+	u.hierarchy = newHierarchyBar(u)
 	u.searchBar = newSearchBar(u)
 	u.selection = newSelection(u)
 	u.statusBar = newStatusBar(u)
 	u.tree = newJSONTree(u)
 	u.jsonLinesBar = newJSONLinesBar(u)
+	if u.app.Preferences().BoolWithFallback(settingShowHierarchy, settingShowHierarchyDefault) {
+		u.hierarchy.Show()
+	}
 
 	if u.app.Preferences().BoolWithFallback(preferenceLastSelectionShown, false) {
 		u.selection.Show()
@@ -123,7 +141,7 @@ func NewUI(app fyne.App) (*UI, error) {
 	}
 
 	c := container.NewBorder(
-		container.NewVBox(u.searchBar, u.jsonLinesBar, u.selection, u.detail, widget.NewSeparator()),
+		container.NewVBox(u.searchBar, u.jsonLinesBar, u.selection, u.detail, u.hierarchy, widget.NewSeparator()),
 		container.NewVBox(widget.NewSeparator(), u.statusBar),
 		nil,
 		nil,
@@ -163,6 +181,7 @@ func NewUI(app fyne.App) (*UI, error) {
 
 func (u *UI) selectElement(uid string) {
 	u.selection.set(uid)
+	u.hierarchy.set(uid)
 	u.selection.enable()
 	u.detail.set(uid)
 	u.jsonLinesBar.syncSelection(uid)
@@ -340,13 +359,31 @@ func (u *UI) toogleHasDocument(enabled bool) {
 }
 
 func (u *UI) setColorTheme(s string) {
+	var base fyne.Theme
 	switch s {
 	case colorThemeLight:
-		u.app.Settings().SetTheme(kxtheme.DefaultWithFixedVariant(theme.VariantLight))
+		base = kxtheme.DefaultWithFixedVariant(theme.VariantLight)
 	case colorThemeDark:
-		u.app.Settings().SetTheme(kxtheme.DefaultWithFixedVariant(theme.VariantDark))
+		base = kxtheme.DefaultWithFixedVariant(theme.VariantDark)
 	default:
-		u.app.Settings().SetTheme(theme.DefaultTheme())
+		base = theme.DefaultTheme()
+	}
+	u.app.Settings().SetTheme(readableDisabledTheme{
+		Theme:     base,
+		textScale: fontSizeScale(u.app.Preferences().StringWithFallback(settingFontSize, settingFontSizeDefault)),
+	})
+}
+
+func fontSizeScale(size string) float32 {
+	switch size {
+	case fontSizeSmall:
+		return 0.85
+	case fontSizeLarge:
+		return 1.2
+	case fontSizeExtraLarge:
+		return 1.4
+	default:
+		return 1
 	}
 }
 
@@ -393,12 +430,28 @@ func (u *UI) showSettingsDialog() {
 	z := u.app.Preferences().BoolWithFallback(settingNotifyUpdates, settingNotifyUpdatesDefault)
 	notifyUpdates.SetOn(z)
 
+	compactTree := kxwidget.NewSwitch(func(v bool) {
+		u.setCompactTree(v)
+	})
+	compactTree.SetOn(u.app.Preferences().BoolWithFallback(settingCompactTree, false))
+
+	showHierarchy := kxwidget.NewSwitch(func(v bool) {
+		u.setShowHierarchy(v)
+	})
+	showHierarchy.SetOn(u.app.Preferences().BoolWithFallback(settingShowHierarchy, settingShowHierarchyDefault))
+
 	// theme
-	theme := widget.NewRadioGroup([]string{colorThemeAuto, colorThemeLight, colorThemeDark}, func(s string) {
+	themeControl := widget.NewRadioGroup([]string{colorThemeAuto, colorThemeLight, colorThemeDark}, func(s string) {
 		u.setColorTheme(s)
 		u.app.Preferences().SetString(settingColorTheme, s)
 	})
-	theme.Selected = u.app.Preferences().StringWithFallback(settingColorTheme, colorThemeAuto)
+	themeControl.Selected = u.app.Preferences().StringWithFallback(settingColorTheme, colorThemeAuto)
+
+	fontSize := widget.NewSelect([]string{fontSizeSmall, fontSizeDefault, fontSizeLarge, fontSizeExtraLarge}, func(size string) {
+		u.app.Preferences().SetString(settingFontSize, size)
+		u.setColorTheme(u.app.Preferences().StringWithFallback(settingColorTheme, colorThemeAuto))
+	})
+	fontSize.SetSelected(u.app.Preferences().StringWithFallback(settingFontSize, settingFontSizeDefault))
 	items := []*widget.FormItem{
 		{
 			Text:   "Max recent files",
@@ -413,7 +466,19 @@ func (u *UI) showSettingsDialog() {
 			Widget: notifyUpdates, HintText: "Wether to notify when an update is available (requires restart)",
 		},
 		{
-			Text: "Appearance", Widget: theme,
+			Text: "Compact tree", Widget: compactTree,
+			HintText: "Reduce vertical spacing between JSON tree items",
+		},
+		{
+			Text: "Always show hierarchy", Widget: showHierarchy,
+			HintText: "Pin the selected item's hierarchy above the tree",
+		},
+		{
+			Text: "Font size", Widget: fontSize,
+			HintText: "Choose the application text size",
+		},
+		{
+			Text: "Appearance", Widget: themeControl,
 			HintText: "Choose the color scheme. Automatic uses the current OS theme.",
 		},
 	}
@@ -506,6 +571,14 @@ func (u *UI) makeMenu() *fyne.MainMenu {
 	u.viewCollapseAll = fyne.NewMenuItem("Collapse All", func() {
 		u.tree.CloseAllBranches()
 	})
+	u.viewCompactTree = fyne.NewMenuItem("Compact tree", func() {
+		u.setCompactTree(!u.app.Preferences().BoolWithFallback(settingCompactTree, false))
+	})
+	u.viewCompactTree.Checked = u.app.Preferences().BoolWithFallback(settingCompactTree, false)
+	u.viewShowHierarchy = fyne.NewMenuItem("Show hierarchy", func() {
+		u.setShowHierarchy(!u.app.Preferences().BoolWithFallback(settingShowHierarchy, settingShowHierarchyDefault))
+	})
+	u.viewShowHierarchy.Checked = u.app.Preferences().BoolWithFallback(settingShowHierarchy, settingShowHierarchyDefault)
 	u.viewShowSelection = fyne.NewMenuItem("Show selected element", func() {
 		u.toogleViewSelection()
 	})
@@ -517,6 +590,9 @@ func (u *UI) makeMenu() *fyne.MainMenu {
 	viewMenu := fyne.NewMenu("View",
 		u.viewExpandAll,
 		u.viewCollapseAll,
+		fyne.NewMenuItemSeparator(),
+		u.viewCompactTree,
+		u.viewShowHierarchy,
 		fyne.NewMenuItemSeparator(),
 		u.viewShowSelection,
 		u.viewShowDetail,
@@ -584,6 +660,7 @@ func (u *UI) newFile() {
 	u.welcomeMessage.Show()
 	u.toogleHasDocument(false)
 	u.selection.reset()
+	u.hierarchy.reset()
 	u.detail.reset()
 	u.jsonLinesBar.reset()
 }
@@ -672,6 +749,28 @@ func (u *UI) toogleViewSelection() {
 	}
 	u.viewShowSelection.Checked = !u.selection.Hidden
 	u.window.MainMenu().Refresh()
+}
+
+func (u *UI) setCompactTree(enabled bool) {
+	u.app.Preferences().SetBool(settingCompactTree, enabled)
+	u.tree.Refresh()
+	if u.viewCompactTree != nil {
+		u.viewCompactTree.Checked = enabled
+		u.window.MainMenu().Refresh()
+	}
+}
+
+func (u *UI) setShowHierarchy(enabled bool) {
+	u.app.Preferences().SetBool(settingShowHierarchy, enabled)
+	if enabled {
+		u.hierarchy.Show()
+	} else {
+		u.hierarchy.Hide()
+	}
+	if u.viewShowHierarchy != nil {
+		u.viewShowHierarchy.Checked = enabled
+		u.window.MainMenu().Refresh()
+	}
 }
 
 func (u *UI) toogleViewDetail() {

@@ -188,6 +188,20 @@ func TestJSONLinesLoad(t *testing.T) {
 			children := j.ChildUIDs(first)
 			assert.NotEmpty(t, children)
 			assert.Equal(t, 0, j.JSONLinesRowIndex(children[0]))
+			for _, child := range children {
+				if j.Value(child).Key != "nested" {
+					continue
+				}
+				nestedChildren := j.ChildUIDs(child)
+				if assert.Len(t, nestedChildren, 1) {
+					path, found := j.PreviewPath(nestedChildren[0])
+					assert.True(t, found)
+					assert.Equal(t, "/nested/value", path)
+					preview, found := j.JSONLinesRowPreview(first, path)
+					assert.True(t, found)
+					assert.Equal(t, "true", preview)
+				}
+			}
 		}
 
 		second, ok := j.JSONLinesRowUID(1)

@@ -26,11 +26,18 @@ func newJSONTree(u *UI) *jsonTree {
 		return u.document.IsBranch(id)
 	}
 	w.CreateNode = func(branch bool) fyne.CanvasObject {
-		return newTreeNode()
+		obj := newTreeNode(func() bool {
+			return u.app.Preferences().BoolWithFallback(settingCompactTree, false)
+		})
+		obj.onSecondaryTap = func(event *fyne.PointEvent) {
+			w.showPreviewKeyMenu(obj, event)
+		}
+		return obj
 	}
 	w.UpdateNode = func(uid widget.TreeNodeID, branch bool, co fyne.CanvasObject) {
 		node := u.document.Value(uid)
 		obj := co.(*treeNode)
+		obj.uid = uid
 		key := node.Key
 		if u.document.IsJSONLines() && u.jsonLinesBar != nil {
 			if preview, ok := u.document.JSONLinesRowPreview(uid, u.jsonLinesBar.selectedPreviewKey()); ok {
@@ -76,7 +83,27 @@ func newJSONTree(u *UI) *jsonTree {
 	w.OnSelected = func(uid widget.TreeNodeID) {
 		u.selectElement(uid)
 	}
+	w.OnBranchOpened = func(uid widget.TreeNodeID) {
+		if u.app.Preferences().BoolWithFallback(settingShowHierarchy, settingShowHierarchyDefault) {
+			u.hierarchy.set(uid)
+		}
+	}
 	return w
+}
+
+func (w *jsonTree) showPreviewKeyMenu(node *treeNode, event *fyne.PointEvent) {
+	path, ok := w.u.document.PreviewPath(node.uid)
+	if !ok {
+		return
+	}
+	label := "Add to row key preview options"
+	action := func() { w.u.jsonLinesBar.addPreviewKey(path) }
+	if w.u.jsonLinesBar.hasPreviewKey(path) {
+		label = "Remove from row key preview options"
+		action = func() { w.u.jsonLinesBar.removePreviewKey(path) }
+	}
+	menu := widget.NewPopUpMenu(fyne.NewMenu("", fyne.NewMenuItem(label, action)), w.u.window.Canvas())
+	menu.ShowAtPosition(event.AbsolutePosition)
 }
 
 func (w *jsonTree) scrollTo(uid widget.TreeNodeID) {

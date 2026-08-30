@@ -255,32 +255,80 @@ func (j *JSONDocument) JSONLinesRowPreview(uid widget.TreeNodeID, key string) (s
 		return "", false
 	}
 	row := j.JSONLinesRowIndex(uid)
-	if row < 0 || key == "" {
+	path := previewPathSegments(key)
+	if row < 0 || len(path) == 0 {
 		return "", false
 	}
-	rowID := j.ids[0][row]
-	if j.values[rowID].Type != Object {
-		return "", false
-	}
-	for _, childID := range j.ids[rowID] {
-		n := j.values[childID]
-		if n.Key != key {
-			continue
+	id := j.ids[0][row]
+	for _, segment := range path {
+		found := false
+		for _, childID := range j.ids[id] {
+			if j.values[childID].Key == segment {
+				id = childID
+				found = true
+				break
+			}
 		}
-		switch n.Type {
-		case String:
-			return n.Value.(string), true
-		case Number:
-			return strconv.FormatFloat(n.Value.(float64), 'f', -1, 64), true
-		case Boolean:
-			return strconv.FormatBool(n.Value.(bool)), true
-		case Null:
-			return "null", true
-		default:
+		if !found {
 			return "", false
 		}
 	}
-	return "", false
+	n := j.values[id]
+	switch n.Type {
+	case String:
+		return n.Value.(string), true
+	case Number:
+		return strconv.FormatFloat(n.Value.(float64), 'f', -1, 64), true
+	case Boolean:
+		return strconv.FormatBool(n.Value.(bool)), true
+	case Null:
+		return "null", true
+	case Object:
+		return "{...}", true
+	case Array:
+		return "[...]", true
+	default:
+		return "", false
+	}
+}
+
+// PreviewPath returns a JSON Pointer-like path for a tree key. Paths in JSON
+// Lines documents are relative to the containing row so they can be reused.
+func (j *JSONDocument) PreviewPath(uid widget.TreeNodeID) (string, bool) {
+	id := uid2id(uid)
+	if id <= 0 || int(id) >= len(j.values) {
+		return "", false
+	}
+	segments := make([]string, 0)
+	for id > 0 {
+		if j.isJSONLines && j.parents[id] == 0 {
+			break
+		}
+		key := j.values[id].Key
+		if key != "" {
+			segments = append(segments, strings.ReplaceAll(strings.ReplaceAll(key, "~", "~0"), "/", "~1"))
+		}
+		id = j.parents[id]
+	}
+	if len(segments) == 0 {
+		return "", false
+	}
+	slices.Reverse(segments)
+	return "/" + strings.Join(segments, "/"), true
+}
+
+func previewPathSegments(path string) []string {
+	if path == "" {
+		return nil
+	}
+	if !strings.HasPrefix(path, "/") {
+		return []string{path}
+	}
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	for i, part := range parts {
+		parts[i] = strings.ReplaceAll(strings.ReplaceAll(part, "~1", "/"), "~0", "~")
+	}
+	return parts
 }
 
 // Parent returns the UID of the parent node.

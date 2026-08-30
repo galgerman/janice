@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"slices"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -21,7 +22,7 @@ type jsonLinesBar struct {
 	currentRow   int
 	next         *ttwidget.Button
 	previous     *ttwidget.Button
-	previewKey   *ttwidget.Select
+	previewKey   *previewKeySelect
 	rowIndicator *widget.Label
 	u            *UI
 }
@@ -33,13 +34,14 @@ func newJSONLinesBar(u *UI) *jsonLinesBar {
 		u:            u,
 	}
 	w.ExtendBaseWidget(w)
-	w.previewKey = ttwidget.NewSelect([]string{noJSONLinesPreview}, func(string) {
+	w.previewKey = newPreviewKeySelect(u.window, func(selected string) {
+		w.u.app.Preferences().SetString(preferenceJSONLinesSelectedPreview, selected)
 		if w.u.tree != nil {
 			w.u.tree.Refresh()
 		}
+	}, func(path string) {
+		w.removePreviewKey(path)
 	})
-	w.previewKey.SetSelected(noJSONLinesPreview)
-	w.previewKey.SetToolTip("Choose a top-level key to show beside each row")
 	w.previous = ttwidget.NewButtonWithIcon("", theme.NavigateBackIcon(), func() {
 		w.goToRow(w.currentRow - 1)
 	})
@@ -57,17 +59,48 @@ func (w *jsonLinesBar) setDocument() {
 		w.reset()
 		return
 	}
-	options := []string{noJSONLinesPreview}
-	options = append(options, w.u.document.JSONLinesPreviewKeys()...)
-	w.previewKey.Options = options
-	w.previewKey.SetSelected(noJSONLinesPreview)
-	w.previewKey.Refresh()
+	w.refreshPreviewKeys()
 	w.currentRow = -1
 	w.Show()
 	w.updateNavigation()
 	if w.u.document.JSONLinesRowCount() > 0 {
 		w.goToRow(0)
 	}
+}
+
+func (w *jsonLinesBar) refreshPreviewKeys() {
+	keys := w.u.app.Preferences().StringList(preferenceJSONLinesPreviewKeys)
+	w.previewKey.Options = append([]string{noJSONLinesPreview}, keys...)
+	selected := w.u.app.Preferences().StringWithFallback(preferenceJSONLinesSelectedPreview, noJSONLinesPreview)
+	if !slices.Contains(w.previewKey.Options, selected) {
+		selected = noJSONLinesPreview
+	}
+	w.previewKey.SetSelected(selected)
+}
+
+func (w *jsonLinesBar) hasPreviewKey(path string) bool {
+	return slices.Contains(w.u.app.Preferences().StringList(preferenceJSONLinesPreviewKeys), path)
+}
+
+func (w *jsonLinesBar) addPreviewKey(path string) {
+	keys := w.u.app.Preferences().StringList(preferenceJSONLinesPreviewKeys)
+	if !slices.Contains(keys, path) {
+		keys = append(keys, path)
+		slices.Sort(keys)
+		w.u.app.Preferences().SetStringList(preferenceJSONLinesPreviewKeys, keys)
+	}
+	w.u.app.Preferences().SetString(preferenceJSONLinesSelectedPreview, path)
+	w.refreshPreviewKeys()
+}
+
+func (w *jsonLinesBar) removePreviewKey(path string) {
+	keys := w.u.app.Preferences().StringList(preferenceJSONLinesPreviewKeys)
+	keys = slices.DeleteFunc(keys, func(key string) bool { return key == path })
+	w.u.app.Preferences().SetStringList(preferenceJSONLinesPreviewKeys, keys)
+	if w.previewKey.Selected == path {
+		w.u.app.Preferences().SetString(preferenceJSONLinesSelectedPreview, noJSONLinesPreview)
+	}
+	w.refreshPreviewKeys()
 }
 
 func (w *jsonLinesBar) reset() {
