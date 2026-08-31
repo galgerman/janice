@@ -14,7 +14,7 @@ type JSONTreeSizer struct {
 func (t *JSONTreeSizer) Calculate(data any) (int, error) {
 	t.count = 0
 	switch v := data.(type) {
-	case map[string]any:
+	case *orderedObject:
 		t.count++
 		t.parseObject(v)
 	case []any:
@@ -27,8 +27,8 @@ func (t *JSONTreeSizer) Calculate(data any) (int, error) {
 }
 
 // parseObject parses an object in a JSON tree.
-func (t *JSONTreeSizer) parseObject(data map[string]any) {
-	for _, v := range data {
+func (t *JSONTreeSizer) parseObject(data *orderedObject) {
+	for _, v := range data.values {
 		t.parseValue(v)
 	}
 }
@@ -44,7 +44,7 @@ func (t *JSONTreeSizer) parseArray(a []any) {
 func (t *JSONTreeSizer) parseValue(v any) {
 	t.count++
 	switch v2 := v.(type) {
-	case map[string]any:
+	case *orderedObject:
 		t.parseObject(v2)
 	case []any:
 		t.parseArray(v2)

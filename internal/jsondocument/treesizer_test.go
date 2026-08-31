@@ -1,44 +1,49 @@
-package jsondocument_test
+package jsondocument
 
 import (
+	"strings"
 	"testing"
 
-	"github.com/ErikKalkoken/janice/internal/jsondocument"
 	"github.com/stretchr/testify/assert"
 )
 
+// decodeForSizer parses JSON the same way the loader does, so the sizer is
+// exercised with the value types it actually receives.
+func decodeForSizer(t *testing.T, s string) any {
+	t.Helper()
+	data, err := decodeOrdered(newDecoder(strings.NewReader(s)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
 func TestCounter(t *testing.T) {
 	t.Run("can size object based tree", func(t *testing.T) {
-		data := map[string]any{
-			"alpha":   "abc",
-			"bravo":   5,
+		data := decodeForSizer(t, `{
+			"alpha": "abc",
+			"bravo": 5,
 			"charlie": true,
-			"delta":   nil,
-			"echo":    []any{1, 2},
-			"foxtrot": map[string]any{"child": 1},
-		}
-		c := jsondocument.JSONTreeSizer{}
+			"delta": null,
+			"echo": [1, 2],
+			"foxtrot": {"child": 1}
+		}`)
+		c := JSONTreeSizer{}
 		x, err := c.Calculate(data)
 		if assert.NoError(t, err) {
 			assert.Equal(t, 10, x)
 		}
 	})
 	t.Run("can size array based tree", func(t *testing.T) {
-		data := []any{
-			"alpha",
-			"bravo",
-			"charlie",
-			[]any{1, 2},
-			map[string]any{"child": 1},
-		}
-		c := jsondocument.JSONTreeSizer{}
+		data := decodeForSizer(t, `["alpha", "bravo", "charlie", [1, 2], {"child": 1}]`)
+		c := JSONTreeSizer{}
 		x, err := c.Calculate(data)
 		if assert.NoError(t, err) {
 			assert.Equal(t, 9, x)
 		}
 	})
 	t.Run("should return error when trying to size invalid structure", func(t *testing.T) {
-		c := jsondocument.JSONTreeSizer{}
+		c := JSONTreeSizer{}
 		_, err := c.Calculate("invalid")
 		assert.Error(t, err)
 	})

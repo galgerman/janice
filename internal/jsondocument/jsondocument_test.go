@@ -47,7 +47,7 @@ func TestJsonDocument(t *testing.T) {
 	})
 	t.Run("should return value of child node", func(t *testing.T) {
 		got := j.Value(deltaID)
-		want := jsondocument.Node{Key: "delta", Value: float64(1), Type: jsondocument.Number}
+		want := jsondocument.Node{Key: "delta", Value: json.Number("1"), Type: jsondocument.Number}
 		assert.Equal(t, want, got)
 	})
 	t.Run("should return empty path for parent node", func(t *testing.T) {
@@ -93,7 +93,7 @@ func TestJsonDocumentLoad(t *testing.T) {
 				case 0:
 					assert.Equal(t, node, jsondocument.Node{Key: "alpha", Value: "abc", Type: jsondocument.String})
 				case 1:
-					assert.Equal(t, node, jsondocument.Node{Key: "bravo", Value: float64(5), Type: jsondocument.Number})
+					assert.Equal(t, node, jsondocument.Node{Key: "bravo", Value: json.Number("5"), Type: jsondocument.Number})
 				case 2:
 					assert.Equal(t, node, jsondocument.Node{Key: "charlie", Value: true, Type: jsondocument.Boolean})
 				case 3:
@@ -104,9 +104,9 @@ func TestJsonDocumentLoad(t *testing.T) {
 						node := j.Value(childId)
 						switch n {
 						case 0:
-							assert.Equal(t, node.Value, float64(1))
+							assert.Equal(t, node.Value, json.Number("1"))
 						case 1:
-							assert.Equal(t, node.Value, float64(2))
+							assert.Equal(t, node.Value, json.Number("2"))
 						}
 					}
 				case 5:
@@ -115,7 +115,7 @@ func TestJsonDocumentLoad(t *testing.T) {
 						node := j.Value(childId)
 						switch n {
 						case 0:
-							assert.Equal(t, node, jsondocument.Node{Key: "child", Value: float64(1), Type: jsondocument.Number})
+							assert.Equal(t, node, jsondocument.Node{Key: "child", Value: json.Number("1"), Type: jsondocument.Number})
 						}
 					}
 				}
@@ -176,7 +176,6 @@ func TestJSONLinesLoad(t *testing.T) {
 
 		assert.True(t, j.IsJSONLines())
 		assert.Equal(t, 2, j.JSONLinesRowCount())
-		assert.Equal(t, []string{"active", "id", "name"}, j.JSONLinesPreviewKeys())
 
 		first, ok := j.JSONLinesRowUID(0)
 		if assert.True(t, ok) {
@@ -220,7 +219,6 @@ func TestJSONLinesLoad(t *testing.T) {
 		assert.NoError(t, err)
 		assert.False(t, j.IsJSONLines())
 		assert.Equal(t, 0, j.JSONLinesRowCount())
-		assert.Empty(t, j.JSONLinesPreviewKeys())
 	})
 
 	t.Run("recognizes a single-row jsonl file by extension", func(t *testing.T) {
@@ -229,7 +227,6 @@ func TestJSONLinesLoad(t *testing.T) {
 		assert.NoError(t, err)
 		assert.True(t, j.IsJSONLines())
 		assert.Equal(t, 1, j.JSONLinesRowCount())
-		assert.Equal(t, []string{"name"}, j.JSONLinesPreviewKeys())
 	})
 
 	t.Run("reports errors in later rows", func(t *testing.T) {
@@ -481,7 +478,7 @@ func TestSearchPreviousAndReplace(t *testing.T) {
 	assert.Equal(t, 2, count)
 	assert.Equal(t, "changed", j.Value(firstID).Value)
 	assert.NoError(t, j.Replace(countID, jsondocument.SearchNumber, "2"))
-	assert.Equal(t, float64(2), j.Value(countID).Value)
+	assert.Equal(t, json.Number("2"), j.Value(countID).Value)
 }
 
 func makeDataReader(data any) fyne.URIReadCloser {
@@ -491,4 +488,77 @@ func makeDataReader(data any) fyne.URIReadCloser {
 	}
 	r := bytes.NewReader(x)
 	return jsondocument.MakeURIReadCloser(r, "test")
+}
+
+func TestMarshalPreservesObjectKeyOrder(t *testing.T) {
+	j := jsondocument.New()
+	src := `{"zebra":1,"apple":{"yankee":2,"bravo":3},"mango":[{"zulu":4,"alpha":5}],"empty":{},"none":[]}`
+	err := j.Load(context.Background(), jsondocument.MakeURIReadCloser(strings.NewReader(src), "test.json"), binding.NewUntyped())
+	if !assert.NoError(t, err) {
+		return
+	}
+	got, err := j.Marshal()
+	if !assert.NoError(t, err) {
+		return
+	}
+	var compact bytes.Buffer
+	if !assert.NoError(t, json.Compact(&compact, got)) {
+		return
+	}
+	assert.Equal(t, src, compact.String())
+}
+
+func TestExtractPreservesObjectKeyOrder(t *testing.T) {
+	j := jsondocument.New()
+	src := `{"outer":{"zebra":1,"apple":2,"mango":{"yankee":3,"bravo":4}}}`
+	err := j.Load(context.Background(), jsondocument.MakeURIReadCloser(strings.NewReader(src), "test.json"), binding.NewUntyped())
+	if !assert.NoError(t, err) {
+		return
+	}
+	got, err := j.Extract(j.ChildUIDs("")[0])
+	if assert.NoError(t, err) {
+		assert.Equal(t, `{"zebra":1,"apple":2,"mango":{"yankee":3,"bravo":4}}`, string(got))
+	}
+}
+
+func TestJSONLinesMarshalPreservesKeyOrder(t *testing.T) {
+	j := jsondocument.New()
+	src := "{\"zebra\":1,\"apple\":2}\n{\"mango\":3,\"bravo\":4}\n"
+	err := j.Load(context.Background(), jsondocument.MakeURIReadCloser(strings.NewReader(src), "test.jsonl"), binding.NewUntyped())
+	if !assert.NoError(t, err) {
+		return
+	}
+	got, err := j.Marshal()
+	if assert.NoError(t, err) {
+		assert.Equal(t, src, string(got))
+	}
+}
+
+func TestNumbersKeepTheirOriginalLiteral(t *testing.T) {
+	j := jsondocument.New()
+	src := `{"id":12345678901234567890,"price":1.10,"exp":1e3,"tiny":0.30000000000000004,"neg":-0}`
+	err := j.Load(context.Background(), jsondocument.MakeURIReadCloser(strings.NewReader(src), "t.json"), binding.NewUntyped())
+	if !assert.NoError(t, err) {
+		return
+	}
+	want := map[string]string{
+		"id":    "12345678901234567890",
+		"price": "1.10",
+		"exp":   "1e3",
+		"tiny":  "0.30000000000000004",
+		"neg":   "-0",
+	}
+	for _, uid := range j.ChildUIDs("") {
+		key := j.Value(uid).Key
+		got, ok := j.ScalarText(uid)
+		if assert.True(t, ok, key) {
+			assert.Equal(t, want[key], got, "literal for %s", key)
+		}
+	}
+	out, err := j.Marshal()
+	if assert.NoError(t, err) {
+		var compact bytes.Buffer
+		assert.NoError(t, json.Compact(&compact, out))
+		assert.Equal(t, src, compact.String())
+	}
 }

@@ -1,13 +1,17 @@
 package ui
 
 import (
+	"encoding/json"
 	"fmt"
 	"image/color"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/driver/desktop"
+	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
@@ -222,7 +226,7 @@ func TestCanLoadDocument(t *testing.T) {
 	u.searchBar.searchEntry.SetText("2")
 	u.searchBar.replaceEntry.SetText("3")
 	u.searchBar.doReplaceAll()
-	assert.Equal(t, float64(3), u.document.Value(uid).Value)
+	assert.Equal(t, json.Number("3"), u.document.Value(uid).Value)
 	assert.Equal(t, "Replaced 1 match", u.searchBar.result.Text)
 }
 
@@ -274,4 +278,160 @@ func TestCanLoadJSONLinesDocument(t *testing.T) {
 	u.jsonLinesBar.previewKey.removeOption("/name")
 	assert.Equal(t, []string{noJSONLinesPreview}, u.jsonLinesBar.previewKey.Options)
 	assert.Empty(t, u.app.Preferences().StringList(preferenceJSONLinesPreviewKeys))
+}
+
+func loadTestDocument(t *testing.T, u *UI, content, name string) {
+	t.Helper()
+	ch := make(chan struct{})
+	u.loadDocument(jsondocument.MakeURIReadCloser(strings.NewReader(content), name), func() {
+		close(ch)
+	})
+	<-ch
+}
+
+func TestConfirmDiscardChangesRunsActionWhenDocumentIsClean(t *testing.T) {
+	a := test.NewTempApp(t)
+	u, err := NewUI(a)
+	assert.NoError(t, err)
+	u.window.Show()
+	loadTestDocument(t, u, `{"alpha": 1}`, "dummy.json")
+
+	var ran bool
+	u.confirmDiscardChanges("Discard", func() { ran = true })
+	assert.True(t, ran)
+}
+
+func TestConfirmDiscardChangesWaitsForConfirmationWhenDirty(t *testing.T) {
+	a := test.NewTempApp(t)
+	u, err := NewUI(a)
+	assert.NoError(t, err)
+	u.window.Show()
+	loadTestDocument(t, u, `{"alpha": 1}`, "dummy.json")
+	assert.True(t, u.applyValueEdit(u.document.ChildUIDs("")[0], "2"))
+	assert.True(t, u.dirty)
+
+	var ran bool
+	u.confirmDiscardChanges("Discard", func() { ran = true })
+	assert.False(t, ran, "action must wait until the user confirms")
+}
+
+func TestNewFileKeepsUnsavedDocumentUntilConfirmed(t *testing.T) {
+	a := test.NewTempApp(t)
+	u, err := NewUI(a)
+	assert.NoError(t, err)
+	u.window.Show()
+	loadTestDocument(t, u, `{"alpha": 1}`, "dummy.json")
+	assert.True(t, u.applyValueEdit(u.document.ChildUIDs("")[0], "2"))
+
+	u.newFile()
+	assert.True(t, u.dirty, "unsaved edits must survive an unconfirmed New File")
+	assert.Equal(t, 2, u.document.Size())
+}
+
+const messyDoc = "{\r\n" +
+	"\t\"zebra\"   :    12345678901234567890,\r\n" +
+	"\t\"apple\": {\r\n" +
+	"\t\t\t\"yankee\" : 1.10\r\n" +
+	"\t},\r\n" +
+	"    \"mango\" : [ 1e3,   true ]\r\n" +
+	"}\r\n\r\n"
+
+func loadFileIntoUI(t *testing.T, u *UI, path string) {
+	t.Helper()
+	reader, err := storage.Reader(storage.NewFileURI(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch := make(chan struct{})
+	u.loadDocument(reader, func() { close(ch) })
+	<-ch
+}
+
+func TestSaveRewritesOnlyTheEditedBytes(t *testing.T) {
+	a := test.NewTempApp(t)
+	u, err := NewUI(a)
+	assert.NoError(t, err)
+	u.window.Show()
+
+	path := filepath.Join(t.TempDir(), "doc.json")
+	assert.NoError(t, os.WriteFile(path, []byte(messyDoc), 0o644))
+	loadFileIntoUI(t, u, path)
+
+	apple := u.document.ChildUIDs("")[1]
+	yankee := u.document.ChildUIDs(apple)[0]
+	assert.True(t, u.applyValueEdit(yankee, "2.20"))
+
+	u.saveFile()
+
+	got, err := os.ReadFile(path)
+	assert.NoError(t, err)
+	assert.Equal(t, strings.Replace(messyDoc, "1.10", "2.20", 1), string(got))
+	assert.False(t, u.dirty)
+	assert.False(t, u.document.HasEdits())
+}
+
+func TestSaveWithoutEditsLeavesTheFileByteIdentical(t *testing.T) {
+	a := test.NewTempApp(t)
+	u, err := NewUI(a)
+	assert.NoError(t, err)
+	u.window.Show()
+
+	path := filepath.Join(t.TempDir(), "doc.json")
+	assert.NoError(t, os.WriteFile(path, []byte(messyDoc), 0o644))
+	loadFileIntoUI(t, u, path)
+
+	u.saveFile()
+
+	got, err := os.ReadFile(path)
+	assert.NoError(t, err)
+	assert.Equal(t, messyDoc, string(got))
+}
+
+func TestSecondSaveSplicesAgainstTheAlreadySavedFile(t *testing.T) {
+	a := test.NewTempApp(t)
+	u, err := NewUI(a)
+	assert.NoError(t, err)
+	u.window.Show()
+
+	path := filepath.Join(t.TempDir(), "doc.json")
+	assert.NoError(t, os.WriteFile(path, []byte(messyDoc), 0o644))
+	loadFileIntoUI(t, u, path)
+
+	apple := u.document.ChildUIDs("")[1]
+	assert.True(t, u.applyValueEdit(u.document.ChildUIDs(apple)[0], "2.20"))
+	u.saveFile()
+
+	// A second, unrelated edit must splice into the file saved a moment ago.
+	assert.True(t, u.applyKeyEdit(u.document.ChildUIDs("")[0], "giraffe"))
+	u.saveFile()
+
+	got, err := os.ReadFile(path)
+	assert.NoError(t, err)
+	want := strings.Replace(messyDoc, "1.10", "2.20", 1)
+	want = strings.Replace(want, `"zebra"`, `"giraffe"`, 1)
+	assert.Equal(t, want, string(got))
+	assert.False(t, u.dirty)
+}
+
+func TestSaveJSONLinesTouchesOnlyTheEditedRow(t *testing.T) {
+	a := test.NewTempApp(t)
+	u, err := NewUI(a)
+	assert.NoError(t, err)
+	u.window.Show()
+
+	const rows = "{\"id\": 1,  \"msg\":\"a\"}\r\n" +
+		"{\"id\":2,\"ms\" : 0.30000000000000004}\n" +
+		"{\"id\":3}\n"
+	path := filepath.Join(t.TempDir(), "doc.jsonl")
+	assert.NoError(t, os.WriteFile(path, []byte(rows), 0o644))
+	loadFileIntoUI(t, u, path)
+
+	row2, ok := u.document.JSONLinesRowUID(1)
+	assert.True(t, ok)
+	assert.True(t, u.applyValueEdit(u.document.ChildUIDs(row2)[1], "0.5"))
+	u.saveFile()
+
+	got, err := os.ReadFile(path)
+	assert.NoError(t, err)
+	assert.Equal(t, strings.Replace(rows, "0.30000000000000004", "0.5", 1), string(got))
 }

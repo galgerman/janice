@@ -1,8 +1,8 @@
 package ui
 
 import (
+	"encoding/json"
 	"fmt"
-	"strconv"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/driver/desktop"
@@ -72,8 +72,7 @@ func newJSONTree(u *UI) *jsonTree {
 		case jsondocument.String:
 			text = fmt.Sprintf("\"%s\"", v)
 		case jsondocument.Number:
-			x := v.(float64)
-			text = strconv.FormatFloat(x, 'f', -1, 64)
+			text = string(v.(json.Number))
 		case jsondocument.Boolean:
 			text = fmt.Sprintf("%v", v)
 		case jsondocument.Null:

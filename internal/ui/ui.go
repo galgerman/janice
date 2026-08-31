@@ -5,8 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
+	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -175,6 +177,9 @@ func NewUI(app fyne.App) (*UI, error) {
 		Height: float32(app.Preferences().FloatWithFallback(preferenceLastWindowHeight, 600)),
 	}
 	u.window.Resize(s)
+	u.window.SetCloseIntercept(func() {
+		u.confirmDiscardChanges("Quit", u.window.Close)
+	})
 	u.window.SetOnClosed(func() {
 		app.Preferences().SetFloat(preferenceLastWindowWidth, float64(u.window.Canvas().Size().Width))
 		app.Preferences().SetFloat(preferenceLastWindowHeight, float64(u.window.Canvas().Size().Height))
@@ -671,6 +676,10 @@ func (u *UI) makeMenu() *fyne.MainMenu {
 }
 
 func (u *UI) openFile() {
+	u.confirmDiscardChanges("Open File", u.showOpenFileDialog)
+}
+
+func (u *UI) showOpenFileDialog() {
 	d := dialog.NewFileOpen(func(reader fyne.URIReadCloser, err error) {
 		if err != nil {
 			u.showErrorDialog("Failed to read folder", err)
@@ -690,8 +699,39 @@ func (u *UI) openFile() {
 	}
 }
 
+// confirmDiscardChanges runs action, first asking for confirmation when the
+// document has edits that have not been saved.
+func (u *UI) confirmDiscardChanges(title string, action func()) {
+	if !u.dirty {
+		action()
+		return
+	}
+	name := u.currentName
+	if name == "" {
+		name = "This document"
+	}
+	d := dialog.NewConfirm(
+		title,
+		fmt.Sprintf("%s has unsaved changes.\nDiscard them?", name),
+		func(discard bool) {
+			if discard {
+				action()
+			}
+		},
+		u.window,
+	)
+	d.SetConfirmText("Discard")
+	d.SetDismissText("Cancel")
+	kxdialog.AddDialogKeyHandler(d, u.window)
+	d.Show()
+}
+
 // newFile resets the app to it's initial state
 func (u *UI) newFile() {
+	u.confirmDiscardChanges("New File", u.resetToEmpty)
+}
+
+func (u *UI) resetToEmpty() {
 	u.document.Reset()
 	u.currentFile = nil
 	u.currentName = ""
@@ -771,30 +811,51 @@ func (u *UI) saveFile() {
 		u.saveFileAs()
 		return
 	}
-	writer, err := storage.Writer(u.currentFile)
+	target := u.currentFile.Path()
+	tmp, normalized, err := u.renderDocument(filepath.Dir(target))
 	if err != nil {
 		u.showErrorDialog("Failed to save file", err)
 		return
 	}
-	u.writeDocument(writer)
+	if err := moveFile(tmp, target); err != nil {
+		os.Remove(tmp)
+		u.showErrorDialog("Failed to save file", err)
+		return
+	}
+	u.afterSave(u.currentFile, normalized)
 }
 
 func (u *UI) saveFileAs() {
+	// The content is rendered before the dialog opens on purpose: the save
+	// dialog truncates whatever file the user picks the moment it hands back a
+	// writer, which would destroy the original bytes if they chose the file the
+	// document was loaded from.
+	tmp, normalized, err := u.renderDocument("")
+	if err != nil {
+		u.showErrorDialog("Failed to save file", err)
+		return
+	}
 	d := dialog.NewFileSave(func(writer fyne.URIWriteCloser, err error) {
 		if err != nil {
+			os.Remove(tmp)
 			u.showErrorDialog("Failed to open save dialog", err)
 			return
 		}
 		if writer == nil {
+			os.Remove(tmp)
 			return
 		}
 		uri := writer.URI()
-		if u.writeDocument(writer) {
-			u.currentFile = uri
-			u.currentName = uri.Name()
-			u.setTitle(u.currentName)
-			u.addRecentFile(uri)
+		writer.Close()
+		if err := moveFile(tmp, uri.Path()); err != nil {
+			os.Remove(tmp)
+			u.showErrorDialog("Failed to save file", err)
+			return
 		}
+		u.currentFile = uri
+		u.currentName = uri.Name()
+		u.addRecentFile(uri)
+		u.afterSave(uri, normalized)
 	}, u.window)
 	if u.currentName != "" {
 		d.SetFileName(u.currentName)
@@ -804,34 +865,104 @@ func (u *UI) saveFileAs() {
 	d.Show()
 }
 
-func (u *UI) writeDocument(writer fyne.URIWriteCloser) bool {
-	data, err := u.document.Marshal()
-	if err == nil {
-		_, err = writer.Write(data)
+// renderDocument writes the document to a new temporary file in dir (the system
+// temporary directory when dir is empty) and returns its path.
+//
+// The content is produced by splicing the user's edits into the bytes of the
+// file the document was loaded from, so every byte that was not edited survives
+// exactly. It reports normalized = true when the original was unavailable and
+// the document had to be rebuilt from the tree instead, which reformats it.
+func (u *UI) renderDocument(dir string) (path string, normalized bool, err error) {
+	tmp, err := os.CreateTemp(dir, ".janice-save-*")
+	if err != nil {
+		return "", false, err
 	}
-	closeErr := writer.Close()
-	if err == nil {
+	path = tmp.Name()
+	normalized, err = u.writeDocumentTo(tmp)
+	if closeErr := tmp.Close(); err == nil {
 		err = closeErr
 	}
 	if err != nil {
-		u.showErrorDialog("Failed to save file", err)
-		return false
+		os.Remove(path)
+		return "", false, err
 	}
+	return path, normalized, nil
+}
+
+func (u *UI) writeDocumentTo(dst io.Writer) (normalized bool, err error) {
+	if src, err := u.originalReader(); err == nil {
+		defer src.Close()
+		// A splice failure means the file on disk no longer matches what was
+		// loaded. Reformatting the whole document instead would throw away the
+		// user's formatting behind their back, so report it.
+		return false, u.document.WriteSpliced(src, dst)
+	}
+	data, err := u.document.Marshal()
+	if err != nil {
+		return false, err
+	}
+	_, err = dst.Write(data)
+	return true, err
+}
+
+// originalReader opens the file this document was loaded from.
+func (u *UI) originalReader() (io.ReadCloser, error) {
+	if u.currentFile == nil || u.currentFile.Scheme() != "file" {
+		return nil, fmt.Errorf("document has no original file")
+	}
+	return os.Open(u.currentFile.Path())
+}
+
+func (u *UI) afterSave(uri fyne.URI, normalized bool) {
+	u.document.ClearEdits()
 	u.dirty = false
 	u.setTitle(u.currentName)
-	return true
+	if normalized {
+		dialog.ShowInformation(
+			"Saved",
+			"The original file was not available, so the document was rebuilt from scratch.\nIts formatting has been normalized.",
+			u.window,
+		)
+	}
+}
+
+// moveFile puts src at dst, falling back to a copy when the two are on
+// different volumes and cannot be renamed.
+func moveFile(src, dst string) error {
+	if err := os.Rename(src, dst); err == nil {
+		return nil
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(out, in)
+	if closeErr := out.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	return os.Remove(src)
 }
 
 func (u *UI) reloadFile() {
 	if u.currentFile == nil {
 		return
 	}
-	reader, err := storage.Reader(u.currentFile)
-	if err != nil {
-		u.showErrorDialog("Failed to reload file", err)
-		return
-	}
-	u.loadDocument(reader, nil)
+	u.confirmDiscardChanges("Reload", func() {
+		reader, err := storage.Reader(u.currentFile)
+		if err != nil {
+			u.showErrorDialog("Failed to reload file", err)
+			return
+		}
+		u.loadDocument(reader, nil)
+	})
 }
 
 func (u *UI) extractSelection() ([]byte, error) {
@@ -885,12 +1016,14 @@ func (u *UI) updateRecentFilesMenu() {
 				continue
 			}
 			items[i] = fyne.NewMenuItem(uri.Path(), func() {
-				reader, err := storage.Reader(uri)
-				if err != nil {
-					dialog.ShowError(err, u.window)
-					return
-				}
-				u.loadDocument(reader, nil)
+				u.confirmDiscardChanges("Open File", func() {
+					reader, err := storage.Reader(uri)
+					if err != nil {
+						dialog.ShowError(err, u.window)
+						return
+					}
+					u.loadDocument(reader, nil)
+				})
 			})
 		}
 		u.fileOpenRecent.ChildMenu.Items = items

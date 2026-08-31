@@ -2,6 +2,7 @@
 package jsondocument
 
 import (
+	"bytes"
 	"context"
 	stdjson "encoding/json"
 	"errors"
@@ -29,8 +30,6 @@ const (
 	totalLoadSteps = 3
 	// Parent ID of root node
 	rootNodeParentID = -1
-	// Search target not found
-	notFound = -1
 )
 
 var ErrCallerCanceled = errors.New("process canceled by caller")
@@ -114,7 +113,7 @@ type JSONDocument struct {
 	progressInfo  binding.Untyped
 	elementsCount int
 	isJSONLines   bool
-	previewKeys   []string
+	edits         map[int32]*nodeEdit
 
 	// ids are stored as int32 to save memory. The API converts them to and from UID strings.
 	ids     map[int32][]int32
@@ -172,6 +171,7 @@ func (j *JSONDocument) SetKey(uid widget.TreeNodeID, key string) error {
 		}
 	}
 	j.values[id].Key = key
+	j.recordEdit(id).setKey(key)
 	return nil
 }
 
@@ -196,23 +196,27 @@ func (j *JSONDocument) SetScalarValue(uid widget.TreeNodeID, value string) error
 	switch n.Type {
 	case String:
 		n.Value = value
+		j.recordEdit(id).setValue(encodeJSONString(value))
 	case Number:
-		x, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
-		if err != nil {
-			return fmt.Errorf("invalid number: %w", err)
+		text := strings.TrimSpace(value)
+		if !isJSONNumber(text) {
+			return fmt.Errorf("invalid number: %s", value)
 		}
-		n.Value = x
+		n.Value = stdjson.Number(text)
+		j.recordEdit(id).setValue(text)
 	case Boolean:
 		x, err := strconv.ParseBool(strings.TrimSpace(value))
 		if err != nil {
 			return fmt.Errorf("boolean must be true or false")
 		}
 		n.Value = x
+		j.recordEdit(id).setValue(strconv.FormatBool(x))
 	case Null:
 		if strings.TrimSpace(value) != "null" {
 			return fmt.Errorf("null value must remain null")
 		}
 		n.Value = nil
+		j.recordEdit(id).setValue("null")
 	default:
 		return fmt.Errorf("arrays and objects can not be edited as values")
 	}
@@ -226,7 +230,7 @@ func (j *JSONDocument) ScalarText(uid widget.TreeNodeID) (string, bool) {
 	case String:
 		return n.Value.(string), true
 	case Number:
-		return strconv.FormatFloat(n.Value.(float64), 'f', -1, 64), true
+		return string(n.Value.(stdjson.Number)), true
 	case Boolean:
 		return strconv.FormatBool(n.Value.(bool)), true
 	case Null:
@@ -242,30 +246,75 @@ func (j *JSONDocument) Marshal() ([]byte, error) {
 	if j.n == 0 {
 		return nil, fmt.Errorf("document is empty")
 	}
+	var buf bytes.Buffer
 	if j.isJSONLines {
-		var result strings.Builder
 		for _, rowID := range j.ids[0] {
-			data, err := json.Marshal(j.extractValue(rowID))
-			if err != nil {
+			if err := j.encodeValue(&buf, rowID, "", 0); err != nil {
 				return nil, err
 			}
-			result.Write(data)
-			result.WriteByte('\n')
+			buf.WriteByte('\n')
 		}
-		return []byte(result.String()), nil
+		return buf.Bytes(), nil
 	}
-	return json.MarshalIndent(j.extractValue(0), "", "  ")
+	if err := j.encodeValue(&buf, 0, "  ", 0); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
-func (j *JSONDocument) extractValue(id int32) any {
+// encodeValue appends the JSON encoding of a node to buf. Unlike marshalling
+// through a map it preserves the object key order of the source document.
+// An empty indent produces compact output.
+func (j *JSONDocument) encodeValue(buf *bytes.Buffer, id int32, indent string, level int) error {
 	n := j.values[id]
-	switch n.Type {
-	case Array:
-		return j.extractArray(id)
-	case Object:
-		return j.extractObject(id)
-	default:
-		return n.Value
+	if n.Type != Object && n.Type != Array {
+		data, err := json.Marshal(n.Value)
+		if err != nil {
+			return err
+		}
+		buf.Write(data)
+		return nil
+	}
+	opening, closing := byte('{'), byte('}')
+	if n.Type == Array {
+		opening, closing = '[', ']'
+	}
+	buf.WriteByte(opening)
+	childIDs := j.ids[id]
+	for i, childID := range childIDs {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		writeIndent(buf, indent, level+1)
+		if n.Type == Object {
+			key, err := json.Marshal(j.values[childID].Key)
+			if err != nil {
+				return err
+			}
+			buf.Write(key)
+			buf.WriteByte(':')
+			if indent != "" {
+				buf.WriteByte(' ')
+			}
+		}
+		if err := j.encodeValue(buf, childID, indent, level+1); err != nil {
+			return err
+		}
+	}
+	if len(childIDs) > 0 {
+		writeIndent(buf, indent, level)
+	}
+	buf.WriteByte(closing)
+	return nil
+}
+
+func writeIndent(buf *bytes.Buffer, indent string, level int) {
+	if indent == "" {
+		return
+	}
+	buf.WriteByte('\n')
+	for range level {
+		buf.WriteString(indent)
 	}
 }
 
@@ -313,9 +362,6 @@ func (j *JSONDocument) Load(ctx context.Context, reader fyne.URIReadCloser, prog
 		return err
 	}
 	j.isJSONLines = isJSONLines
-	if isJSONLines {
-		j.previewKeys = collectPreviewKeys(data)
-	}
 	data = nil // GC can free this memory
 	slog.Info("Finished loading JSON document into tree", "size", j.n)
 	return nil
@@ -325,7 +371,7 @@ func (j *JSONDocument) Load(ctx context.Context, reader fyne.URIReadCloser, prog
 func (j *JSONDocument) Reset() {
 	j.initialize(0)
 	j.isJSONLines = false
-	j.previewKeys = nil
+	j.edits = nil
 }
 
 // IsJSONLines reports whether the document was loaded from a stream containing
@@ -340,12 +386,6 @@ func (j *JSONDocument) JSONLinesRowCount() int {
 		return 0
 	}
 	return len(j.ids[0])
-}
-
-// JSONLinesPreviewKeys returns the scalar keys available on top-level JSON
-// Lines objects. The returned slice is safe for callers to modify.
-func (j *JSONDocument) JSONLinesPreviewKeys() []string {
-	return slices.Clone(j.previewKeys)
 }
 
 // JSONLinesRowUID returns the tree UID for a zero-based JSON Lines row.
@@ -368,21 +408,27 @@ func (j *JSONDocument) JSONLinesRowIndex(uid widget.TreeNodeID) int {
 			return -1
 		}
 	}
-	return slices.Index(j.ids[0], id)
+	row, found := slices.BinarySearch(j.ids[0], id)
+	if !found {
+		return -1
+	}
+	return row
 }
 
 // JSONLinesRowPreview returns a formatted scalar value for key on the row
 // represented by uid.
 func (j *JSONDocument) JSONLinesRowPreview(uid widget.TreeNodeID, key string) (string, bool) {
-	if uid == "" || j.parents[uid2id(uid)] != 0 {
+	// This runs for every visible tree row, so it resolves the row from the uid
+	// directly. A node whose parent is the root is itself a row, which makes
+	// looking up its position among the rows unnecessary.
+	id := uid2id(uid)
+	if uid == "" || j.parents[id] != 0 {
 		return "", false
 	}
-	row := j.JSONLinesRowIndex(uid)
 	path := previewPathSegments(key)
-	if row < 0 || len(path) == 0 {
+	if len(path) == 0 {
 		return "", false
 	}
-	id := j.ids[0][row]
 	for _, segment := range path {
 		found := false
 		for _, childID := range j.ids[id] {
@@ -401,7 +447,7 @@ func (j *JSONDocument) JSONLinesRowPreview(uid widget.TreeNodeID, key string) (s
 	case String:
 		return n.Value.(string), true
 	case Number:
-		return strconv.FormatFloat(n.Value.(float64), 'f', -1, 64), true
+		return string(n.Value.(stdjson.Number)), true
 	case Boolean:
 		return strconv.FormatBool(n.Value.(bool)), true
 	case Null:
@@ -512,16 +558,15 @@ func (j *JSONDocument) loadWithFormat(ctx context.Context, reader io.ReadCloser)
 	if err := j.setProgressInfo(ProgressInfo{CurrentStep: 1}); err != nil {
 		return nil, false, err
 	}
-	var data any
 	reader2 := newReaderContext(ctx, reader)
-	dec := stdjson.NewDecoder(reader2)
-	if err := dec.Decode(&data); err != nil {
+	dec := newDecoder(reader2)
+	data, err := decodeOrdered(dec)
+	if err != nil {
 		return nil, false, err
 	}
 	rows := []any{data}
 	for {
-		var row any
-		err := dec.Decode(&row)
+		row, err := decodeOrdered(dec)
 		if errors.Is(err, io.EOF) {
 			break
 		}
@@ -536,38 +581,12 @@ func (j *JSONDocument) loadWithFormat(ctx context.Context, reader io.ReadCloser)
 	return rows, true, nil
 }
 
-func collectPreviewKeys(data any) []string {
-	rows, ok := data.([]any)
-	if !ok {
-		return nil
-	}
-	keys := make(map[string]struct{})
-	for _, row := range rows {
-		object, ok := row.(map[string]any)
-		if !ok {
-			continue
-		}
-		for key, value := range object {
-			switch value.(type) {
-			case string, float64, bool, nil:
-				keys[key] = struct{}{}
-			}
-		}
-	}
-	result := make([]string, 0, len(keys))
-	for key := range keys {
-		result = append(result, key)
-	}
-	slices.Sort(result)
-	return result
-}
-
 // render is the main method for rendering the JSON data into a tree.
 func (j *JSONDocument) render(ctx context.Context, data any, size int32) error {
 	j.initialize(size)
 	var err error
 	switch v := data.(type) {
-	case map[string]any:
+	case *orderedObject:
 		if _, err := j.addNode(ctx, -1, "", Empty, Object); err != nil {
 			return err
 		}
@@ -584,15 +603,9 @@ func (j *JSONDocument) render(ctx context.Context, data any, size int32) error {
 }
 
 // addObject adds a JSON object to the tree.
-func (j *JSONDocument) addObject(ctx context.Context, parentID int32, data map[string]any) error {
-	keys := make([]string, 0, len(data))
-	for k := range data {
-		keys = append(keys, k)
-	}
-	slices.Sort(keys)
-	for _, k := range keys {
-		v := data[k]
-		if err := j.addValue(ctx, parentID, k, v); err != nil {
+func (j *JSONDocument) addObject(ctx context.Context, parentID int32, data *orderedObject) error {
+	for i, k := range data.keys {
+		if err := j.addValue(ctx, parentID, k, data.values[i]); err != nil {
 			return err
 		}
 	}
@@ -617,7 +630,7 @@ func (j *JSONDocument) addArray(ctx context.Context, parentID int32, a []any) er
 // addValue adds a JSON value to the tree.
 func (j *JSONDocument) addValue(ctx context.Context, parentID int32, k string, v any) error {
 	switch v2 := v.(type) {
-	case map[string]any:
+	case *orderedObject:
 		id, err := j.addNode(ctx, parentID, k, Empty, Object)
 		if err != nil {
 			return err
@@ -638,7 +651,7 @@ func (j *JSONDocument) addValue(ctx context.Context, parentID int32, k string, v
 		if err != nil {
 			return err
 		}
-	case float64:
+	case stdjson.Number:
 		_, err := j.addNode(ctx, parentID, k, v2, Number)
 		if err != nil {
 			return err
@@ -702,6 +715,7 @@ func (j *JSONDocument) initialize(size int32) {
 	j.ids = make(map[int32][]int32)
 	j.values = make([]Node, size)
 	j.parents = make([]int32, size)
+	j.edits = nil
 	j.n = 0
 }
 
@@ -729,39 +743,32 @@ func (j *JSONDocument) SearchDirection(ctx context.Context, uid widget.TreeNodeI
 	if err != nil {
 		return "", err
 	}
-	ids := j.flattenIDs(0)
-	start := slices.Index(ids, uid2id(uid))
+	// Node ids are assigned depth-first while the tree is built, so walking them
+	// in numeric order is the same traversal without materializing a slice.
+	start := int32(uid2id(uid))
 	if direction == SearchBackward {
 		if uid == "" {
-			start = len(ids)
+			start = j.n
 		}
-		for i := start - 1; i >= 0; i-- {
+		for id := start - 1; id >= 0; id-- {
 			if err := ctx.Err(); err != nil {
 				return "", ErrCallerCanceled
 			}
-			if j.matches(ids[i], pattern, typ) {
-				return id2uid(ids[i]), nil
+			if j.matches(id, pattern, typ) {
+				return id2uid(id), nil
 			}
 		}
 		return "", ErrNotFound
 	}
-	for i := start + 1; i < len(ids); i++ {
+	for id := start + 1; id < j.n; id++ {
 		if err := ctx.Err(); err != nil {
 			return "", ErrCallerCanceled
 		}
-		if j.matches(ids[i], pattern, typ) {
-			return id2uid(ids[i]), nil
+		if j.matches(id, pattern, typ) {
+			return id2uid(id), nil
 		}
 	}
 	return "", ErrNotFound
-}
-
-func (j *JSONDocument) flattenIDs(id int32) []int32 {
-	result := []int32{id}
-	for _, childID := range j.ids[id] {
-		result = append(result, j.flattenIDs(childID)...)
-	}
-	return result
 }
 
 func (j *JSONDocument) matches(id int32, pattern *regexp.Regexp, typ SearchType) bool {
@@ -775,7 +782,7 @@ func (j *JSONDocument) matches(id int32, pattern *regexp.Regexp, typ SearchType)
 		}
 		return n.Type == Null && pattern.MatchString("null")
 	case SearchNumber:
-		return n.Type == Number && pattern.MatchString(strconv.FormatFloat(n.Value.(float64), 'f', -1, 64))
+		return n.Type == Number && pattern.MatchString(string(n.Value.(stdjson.Number)))
 	case SearchString:
 		return n.Type == String && pattern.MatchString(n.Value.(string))
 	default:
@@ -801,7 +808,7 @@ func (j *JSONDocument) ReplaceAll(ctx context.Context, search string, typ Search
 		return 0, err
 	}
 	count := 0
-	for _, id := range j.flattenIDs(0) {
+	for id := int32(0); id < j.n; id++ {
 		if err := ctx.Err(); err != nil {
 			return count, ErrCallerCanceled
 		}
@@ -814,75 +821,6 @@ func (j *JSONDocument) ReplaceAll(ctx context.Context, search string, typ Search
 		count++
 	}
 	return count, nil
-}
-
-func (j *JSONDocument) searchNode(ctx context.Context, id int32, pattern *regexp.Regexp, typ SearchType) (int32, error) {
-	n := j.values[id]
-	if n.Type == Array || n.Type == Object {
-		foundID, err := j.searchContainer(ctx, id, pattern, typ)
-		if err != nil {
-			return 0, err
-		}
-		if foundID != notFound {
-			return foundID, nil
-		}
-	}
-	switch typ {
-	case SearchKey:
-		if pattern.MatchString(n.Key) {
-			return id, nil
-		}
-	case SearchKeyword:
-		switch n.Type {
-		case Boolean:
-			if pattern.MatchString(fmt.Sprint(n.Value)) {
-				return id, nil
-			}
-		case Null:
-			if pattern.MatchString("null") {
-				return id, nil
-			}
-		default:
-			return notFound, nil
-		}
-	case SearchNumber:
-		if n.Type != Number {
-			return notFound, nil
-		}
-		v := n.Value.(float64)
-		if pattern.MatchString(strconv.FormatFloat(v, 'f', -1, 64)) {
-			return id, nil
-		}
-	case SearchString:
-		if n.Type != String {
-			return notFound, nil
-		}
-		v := n.Value.(string)
-		if pattern.MatchString(v) {
-			return id, nil
-		}
-	default:
-		panic("Undefined search type")
-	}
-	return notFound, nil
-}
-
-func (j *JSONDocument) searchContainer(ctx context.Context, id int32, pattern *regexp.Regexp, typ SearchType) (int32, error) {
-	select {
-	case <-ctx.Done():
-		return 0, ErrCallerCanceled
-	default:
-	}
-	for _, childID := range j.ids[id] {
-		foundID, err := j.searchNode(ctx, childID, pattern, typ)
-		if err != nil {
-			return 0, err
-		}
-		if foundID != notFound {
-			return foundID, nil
-		}
-	}
-	return notFound, nil
 }
 
 func wildCardToRegexp(pattern string) string {
@@ -909,35 +847,15 @@ func wildCardToRegexp(pattern string) string {
 // Extract returns a segment of the JSON document, with the given UID as new root container.
 // Note that only arrays and objects can be extracted
 func (j *JSONDocument) Extract(uid widget.TreeNodeID) ([]byte, error) {
-	var data any
 	id := uid2id(uid)
-	n := j.values[id]
-	switch n.Type {
-	case Array:
-		data = j.extractArray(id)
-	case Object:
-		data = j.extractObject(id)
-	default:
+	if n := j.values[id]; n.Type != Array && n.Type != Object {
 		return nil, fmt.Errorf("can only extract objects and arrays")
 	}
-	return json.Marshal(data)
-}
-
-func (j *JSONDocument) extractArray(id int32) []any {
-	data := make([]any, len(j.ids[id]))
-	for i, childID := range j.ids[id] {
-		data[i] = j.extractValue(childID)
+	var buf bytes.Buffer
+	if err := j.encodeValue(&buf, id, "", 0); err != nil {
+		return nil, err
 	}
-	return data
-}
-
-func (j *JSONDocument) extractObject(id int32) map[string]any {
-	data := make(map[string]any)
-	for _, childID := range j.ids[id] {
-		n := j.values[childID]
-		data[n.Key] = j.extractValue(childID)
-	}
-	return data
+	return buf.Bytes(), nil
 }
 
 func uid2id(uid widget.TreeNodeID) int32 {
